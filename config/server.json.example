@@ -1,0 +1,20 @@
+{
+  "httpPort": 8080,
+  "mysqlHost": "mysql",
+  "mysqlPort": 3306,
+  "mysqlDatabase": "ocrservice",
+  "mysqlUser": "ocrservice",
+  "mqttHost": "mqtt",
+  "mqttPublicHost": "192.168.137.128",
+  "mqttPort": 1883,
+  "mqttServerUsername": "plate-server",
+  "mqttManagementUsername": "management-client",
+  "imageRoot": "/app/data/images",
+  "logRoot": "/app/data/logs",
+  "modelRoot": "/app/models",
+  "recognitionWorkers": 1,
+  "recognitionQueueCapacity": 20,
+  "tokenTtlSeconds": 28800,
+  "yoloConfidence": 0.25,
+  "yoloNmsIou": 0.45
+}
