@@ -112,10 +112,13 @@ TEST(ProtocolErrorTest, MapsEveryStableCodeToItsRequiredHttpStatus) {
         {ErrorCode::recognitionNotFound, "RECOGNITION_NOT_FOUND", 404},
         {ErrorCode::imageNotFound, "IMAGE_NOT_FOUND", 404},
         {ErrorCode::accessListNotFound, "ACCESS_LIST_NOT_FOUND", 404},
+        {ErrorCode::routeNotFound, "ROUTE_NOT_FOUND", 404},
+        {ErrorCode::methodNotAllowed, "METHOD_NOT_ALLOWED", 405},
         {ErrorCode::captureIdConflict, "CAPTURE_ID_CONFLICT", 409},
         {ErrorCode::accessListConflictWhite, "ACCESS_LIST_CONFLICT_WHITE", 409},
         {ErrorCode::accessListConflictBlack, "ACCESS_LIST_CONFLICT_BLACK", 409},
         {ErrorCode::imageTooLarge, "IMAGE_TOO_LARGE", 413},
+        {ErrorCode::requestTooLarge, "REQUEST_TOO_LARGE", 413},
         {ErrorCode::imageStorageError, "IMAGE_STORAGE_ERROR", 500},
         {ErrorCode::internalError, "INTERNAL_ERROR", 500},
         {ErrorCode::recognitionQueueFull, "RECOGNITION_QUEUE_FULL", 503},
@@ -275,6 +278,10 @@ TEST(HttpPolicyTest, DefinesExactContentTypesLimitsAndNoRedirects) {
     EXPECT_TRUE(http::protocol::isAllowedImageContentType("image/png"));
     EXPECT_FALSE(http::protocol::isAllowedImageContentType("image/gif"));
     EXPECT_TRUE(http::protocol::isJsonSizeAllowed(http::protocol::kMaximumJsonBytes));
+    EXPECT_EQ(http::protocol::kMaximumRawUrlBytes, 8U * 1024U);
+    EXPECT_EQ(http::protocol::kMaximumRequestHeadBytes, 80U * 1024U);
+    EXPECT_EQ(http::protocol::kMaximumMultipartBytes, 11U * 1024U * 1024U);
+    EXPECT_EQ(http::protocol::kMaximumUploadImageBytes, 10U * 1024U * 1024U);
     EXPECT_FALSE(http::protocol::isJsonSizeAllowed(http::protocol::kMaximumJsonBytes + 1U));
     EXPECT_NO_THROW(http::protocol::requireNonRedirectStatus(202));
     EXPECT_THROW(http::protocol::requireNonRedirectStatus(301), http::protocol::HttpPolicyError);

@@ -9,6 +9,10 @@
 namespace ocrservice::http::protocol {
 
 constexpr std::size_t kMaximumJsonBytes = 2U * 1024U * 1024U;
+constexpr std::size_t kMaximumRawUrlBytes = 8U * 1024U;
+constexpr std::size_t kMaximumRequestHeadBytes = 80U * 1024U;
+constexpr std::size_t kMaximumMultipartBytes = 11U * 1024U * 1024U;
+constexpr std::size_t kMaximumUploadImageBytes = 10U * 1024U * 1024U;
 constexpr std::size_t kMaximumImageResponseBytes = 20U * 1024U * 1024U;
 
 enum class ResponseBodyKind { json, jpeg, png, csv };

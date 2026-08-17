@@ -30,6 +30,10 @@ std::string_view toString(const ErrorCode code) {
             return "IMAGE_NOT_FOUND";
         case ErrorCode::accessListNotFound:
             return "ACCESS_LIST_NOT_FOUND";
+        case ErrorCode::routeNotFound:
+            return "ROUTE_NOT_FOUND";
+        case ErrorCode::methodNotAllowed:
+            return "METHOD_NOT_ALLOWED";
         case ErrorCode::captureIdConflict:
             return "CAPTURE_ID_CONFLICT";
         case ErrorCode::accessListConflictWhite:
@@ -38,6 +42,8 @@ std::string_view toString(const ErrorCode code) {
             return "ACCESS_LIST_CONFLICT_BLACK";
         case ErrorCode::imageTooLarge:
             return "IMAGE_TOO_LARGE";
+        case ErrorCode::requestTooLarge:
+            return "REQUEST_TOO_LARGE";
         case ErrorCode::imageStorageError:
             return "IMAGE_STORAGE_ERROR";
         case ErrorCode::internalError:
@@ -69,12 +75,16 @@ int httpStatusFor(const ErrorCode code) noexcept {
         case ErrorCode::recognitionNotFound:
         case ErrorCode::imageNotFound:
         case ErrorCode::accessListNotFound:
+        case ErrorCode::routeNotFound:
             return 404;
+        case ErrorCode::methodNotAllowed:
+            return 405;
         case ErrorCode::captureIdConflict:
         case ErrorCode::accessListConflictWhite:
         case ErrorCode::accessListConflictBlack:
             return 409;
         case ErrorCode::imageTooLarge:
+        case ErrorCode::requestTooLarge:
             return 413;
         case ErrorCode::imageStorageError:
         case ErrorCode::internalError:

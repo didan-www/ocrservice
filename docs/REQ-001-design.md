@@ -189,6 +189,8 @@ Application
 
 Crow 并发数保持小而固定以适配教学负载。MySQL 使用固定 6 个连接的有界连接池；启动使用一个共享 60 秒连接预算建立全部 6 个连接，每个连接建立后选择配置 schema 并执行 `SET time_zone = '+00:00'`。每次 Repository 调用通过带调用方超时的 RAII 租约独占一个连接，连接不可跨线程共享。租约归还前无条件执行 rollback 并恢复 autocommit、配置 schema 和 UTC 会话时区；坏连接被丢弃并在预算内补建，连接池关闭会唤醒所有等待者。租约持有共享池状态而不是连接池对象裸指针，因此连接池对象先关闭或析构后，存量租约仍能安全关闭连接并归还计数，不访问悬空 owner。
 
+HTTP 运行时显式绑定 `0.0.0.0`，监听端口来自配置中的 `HTTP_PORT`（教学默认 `8080`），使用固定 4 个 worker 和 5 秒请求读取空闲超时，不使用按宿主机核数变化的 `multithreaded()`。`HttpServer::run()` 阻塞当前线程，`stop()` 幂等；线程创建、信号处理和组合顺序由 TASK-019 负责。
+
 `ModelRuntime` 在启动后只读。默认只有一个识别 worker，因此两个 ONNX Session 不需要外部并发锁；若把 `RECOGNITION_WORKERS` 调大，每个 worker 独立持有两个 Session，避免共享可变输入缓冲区。
 
 ## 7. 核心领域类型与端口
@@ -298,6 +300,10 @@ Crow route
 
 顶层异常边界只返回五字段失败信封。未分类异常为 HTTP 500 `INTERNAL_ERROR`，不得输出堆栈、SQL、Token 或路径。
 
+限制按原始字节计算：URL 8 KiB、请求行与全部 Header 合计 80 KiB、JSON body 2 MiB、multipart 整体 11 MiB，其中 `image` part 10 MiB。边界值允许，超限统一为 413 `REQUEST_TOO_LARGE`；图片 part 单独超过 10 MiB 仍为 `IMAGE_TOO_LARGE`。固定校验优先级为 requestId、大小、Content-Type、Bearer 格式、业务鉴权、decoder、service、serializer、响应保护、访问日志。
+
+固定 Crow 1.2.1 通过最小适配补丁增加接收期大小中止、解析错误回调、统一路由错误、增量流式写入和发送成功响应头后的 abort。补丁不得改变业务路由或引入第二套 HTTP 框架，并由真实 socket 组件测试固定其行为。
+
 ### 8.2 严格 JSON
 
 nlohmann/json 只作为语法树和序列化工具，不直接对外暴露。每个请求 DTO 定义唯一的允许字段集合：
@@ -308,6 +314,8 @@ nlohmann/json 只作为语法树和序列化工具，不直接对外暴露。每
 4. 禁止隐式字符串转数字、数字转字符串或缺字段默认值。
 
 JSON 请求的媒体类型按 ASCII 大小写不敏感匹配 `application/json`。只接受无参数，或唯一的 `charset=utf-8` 参数；参数名和值同样大小写不敏感。其他参数、重复参数和非 UTF-8 charset 在进入 decoder 前映射为 `INVALID_REQUEST`。JSON 响应始终输出精确的 `application/json`。
+
+JSON POST 必须携带合法 JSON Content-Type。注销为空 body，可不带 Content-Type 或携带合法 JSON Content-Type。GET/DELETE 必须为空 body且空 body 时忽略 Content-Type。multipart 上传只接受唯一合法 boundary。Authorization 缺失时 Bearer parser 输出空值并交给接口业务鉴权映射 401；Header 存在但为空、重复或 Bearer 语法错误时返回 400 `INVALID_REQUEST`；格式合法时只输出 token 值，Token 有效性、到期和主体权限仍由 service 完成。
 
 响应不使用反射式“序列化所有成员”。每个 DTO 有显式 `toJsonExact()`，按 `REQ-001` 构造固定字段；可空字段始终写 `null`。统一 `EnvelopeWriter` 是五字段信封的唯一生成入口。
 
@@ -332,6 +340,10 @@ JSON 请求的媒体类型按 ASCII 大小写不敏感匹配 `application/json`�
 
 路由只注册 `REQ-001` 中的接口；不提供旧 `/plate/upload`、设备管理 API 或调试 API。不存在路由、方法错误和 Crow 解析错误也必须转成统一 JSON 失败信封，不返回 HTML。
 
+未知路径返回 404 `ROUTE_NOT_FOUND`，已知路径的方法错误返回 405 `METHOD_NOT_ALLOWED`，两者均不执行鉴权。禁止 Crow 自动 HEAD、OPTIONS 和尾斜杠 301：已知路径上的 HEAD/OPTIONS 返回 405，未知路径和非规范尾斜杠路径返回 404。
+
+控制器通过受限 registrar 在 `run()` 前注册，运行后路由集合封闭。`HttpServer` 拥有 Crow app，不拥有 controller 或 service；调用方必须保证注册回调捕获对象在服务器停止前存活。中央 runtime 不硬编码任何业务路由。
+
 图片成功响应直接流式发送已打开文件描述符，Content-Type 来自数据库中已验证的 `image_mime`。CSV 使用分页游标按固定排序分批读取并流式转义输出，第一块先写 UTF-8 BOM 和固定十列表头，不在内存构建完整 CSV。
 
 Qt 注销请求的 body 长度固定允许为 0；即使请求携带 `Content-Type: application/json`，控制器也不得强制把空 body 解析为 `{}`。非空 body、`Content-Length` 与实际 body 不一致或 chunked body 含任何字节均按 `INVALID_REQUEST` 拒绝。
@@ -350,6 +362,8 @@ Qt 的总时限从发出请求持续到完整响应体接收完成，服务端�
 | CSV | 120 秒 | 使用同一筛选/排序游标持续分批输出，不在内存聚合完整结果 |
 
 服务端不得通过 3xx 延长流程。图片和 CSV 在发送成功响应头之前失败时返回严格 JSON 失败信封；发送成功响应头之后发生文件、数据库或写 socket 错误时，必须异常终止当前 HTTP 连接，使 Qt 得到传输失败并放弃 `QSaveFile`，不得正常结束响应或补写伪造 CSV 行。
+
+统一响应保护在发送 Header 前拒绝 3xx 和超过 2 MiB 的 JSON，并改写为固定 500 `INTERNAL_ERROR` 信封。访问日志以单调时钟计时至完整响应结束或连接中止，只记录方法、路由模板、HTTP 状态、业务码、requestId、duration 和允许的可选业务 ID；Crow 自带会输出 raw URL 或异常原文的日志必须关闭。
 
 ## 9. Qt 鉴权与会话
 

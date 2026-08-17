@@ -95,8 +95,19 @@ FetchContent_Declare(
     crow
     URL https://codeload.github.com/CrowCpp/Crow/tar.gz/refs/tags/v1.2.1
     URL_HASH SHA256=552f2e447adf70ed4c667d6f82db53dfc70710b50431004ab1405f5b53f04c30
+    PATCH_COMMAND
+        "${CMAKE_COMMAND}"
+        "-DCROW_SOURCE_DIR=<SOURCE_DIR>"
+        -P "${CMAKE_CURRENT_LIST_DIR}/PatchCrow121.cmake"
 )
 FetchContent_MakeAvailable(crow)
+target_compile_definitions(
+    Crow
+    INTERFACE
+        CROW_DISABLE_STATIC_DIR
+        CROW_HTTP_MAX_HEADER_SIZE=81920
+        CROW_OCR_AUTOMATIC_HEAD_OPTIONS=0
+)
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 set(JSON_Install OFF CACHE INTERNAL "")
