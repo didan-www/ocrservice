@@ -583,21 +583,27 @@ WHERE recognition_id = ? AND status = 'PROCESSING';
 
 ### 15.1 连接与线程安全
 
-`PahoMqttPublisher` 使用一个 `async_client`，Client ID 固定 `plate-server`、MQTT 3.1.1、clean session true。连接状态由原子值维护，回调只更新状态和唤醒重连控制，不访问 Repository。
+`PahoMqttPublisher` 使用 Paho MQTT C++ 1.4.1/Paho MQTT C 1.3.13 的一个 `async_client`，Client ID 固定 `plate-server`、MQTT 3.1.1、clean session true。client 使用无 persistence、无离线缓冲的构造方式，automatic reconnect 固定关闭。连接状态由原子值维护，回调只更新状态和唤醒重连控制，不访问 Repository。
 
-重连采用有上限的指数退避并加入小幅抖动；应用启动时 Broker 不可用不阻止 HTTP。发布入口用互斥量串行化 Payload 构造和 Paho publish 调用，保证单进程调用顺序。QoS 1、retain false 固定，调用方不能覆盖。
+具体类公开一次性的非阻塞 `start()`、幂等 `noexcept stop()` 和 `isConnected()`。构造时可注入 first-connected observer；它只在本进程首次 CONNACK 成功后由重连控制线程在内部锁外调用一次，后续重连不再调用。observer 异常被捕获为脱敏日志。TASK-019 保有启动恢复列表并在 observer 中执行每条一次的发布尝试，发布器本身不访问 Repository。
+
+唯一重连控制线程在 `start()` 后立即发起首次连接。连接失败后的基准退避固定为 1、2、4、8、16、30 秒并保持 30 秒上限，每次等待使用可注入抖动源生成均匀正负 20% 偏移；成功后复位。connect timeout 为 5 秒、keepalive 为 60 秒。认证等持续错误也继续按上限重试；condition variable 使停止能够打断退避，且状态机禁止重叠连接尝试。停止先进入 stopping 并拒绝新发布，再用最多 2 秒 quiesce 断开、禁用回调和 join 控制线程；停止后不支持再次启动。
+
+Broker URI 只由 `MQTT_HOST/MQTT_PORT` 构造成 `tcp://host:port`。hostname/IPv4 原样使用；含冒号的主机值必须能解析为合法的原始 IPv6 或合法的方括号 IPv6，未加方括号的原始 IPv6 自动加方括号；scheme、路径、端口、游离或内部方括号、空白和控制字符在创建 Paho client 前拒绝。连接状态只在 CONNACK 成功后置 true，connection-lost、同步断开错误和 stop 置 false。
+
+发布入口用互斥量串行化消息前置条件、Payload 构造和 Paho publish 调用，保证单进程调用顺序。QoS 1、retain false 固定，调用方不能覆盖。它不等待 PUBACK：`publish()` 成功返回非空 delivery token 即返回 `PublishAttempt::accepted()`。token 使用预先安装的 action listener；后续失败仅记录脱敏技术日志，不能修改已返回结果。
 
 ### 15.2 Payload
 
 管理消息直接使用与 HTTP 相同的 `RecognitionSnapshotSerializer`，根对象无信封，字段集合完全相等，绝不包含 `gateAction`。
 
-设备消息复用快照字段并由专用 serializer 增加唯一字段 `gateAction`。只有最终状态可序列化；`SUCCEEDED -> OPEN`、`FAILED -> KEEP_CLOSED` 在领域纯函数中定义。
+设备消息复用快照字段并由专用 serializer 增加唯一字段 `gateAction`。只有最终状态可序列化；`SUCCEEDED -> OPEN`、`FAILED -> KEEP_CLOSED` 在领域纯函数中定义。`publishDeviceFinal` 的显式动作必须与该映射相同；PROCESSING 或动作不匹配在触碰 transport 前抛 `std::invalid_argument`，不占用 `PublishFailure` 的基础设施分类。
 
 主题由 `TopicBuilder` 根据经过校验的 `deviceId` 生成，禁止从上传请求直接传入主题字符串。
 
 ### 15.3 已接受的丢失语义
 
-发布是提交数据库后的 best effort 副作用。若 Paho/Broker 未接受：
+发布是提交数据库后的 best effort 副作用。若 Paho `publish()` 没有接受：
 
 - 返回失败结果并记录脱敏日志。
 - 不回滚数据库。
@@ -605,7 +611,11 @@ WHERE recognition_id = ? AND status = 'PROCESSING';
 - Qt 或设备可能永久收不到该事件。
 - 设备未收到最终结果时保持闸杆关闭。
 
-Paho 自身为当前连接中已接收的 QoS 1 发布执行协议重传，不把它扩展为跨应用重启的业务重发。
+断开期间的新调用不进入 Paho 离线队列。Paho 只为当前进程中已经返回 delivery token 的 QoS 1 in-flight 发布执行协议重传，允许产生 DUP，不把它扩展为跨应用重启的业务重发。相同快照被显式调用两次时执行两次发布，发布器不做业务去重。
+
+同步 disconnected 映射 `notConnected`，stopping/stopped 映射 `stopping`，同步安全或明确拒绝映射 `brokerRejected`，其余 Paho/传输异常映射 `transportError`。MQTT 3.1.1 没有可可靠表达 ACL 拒绝的负 PUBACK，异步拒绝只能记录技术日志，不能追溯改变 `PublishAttempt`。
+
+日志适配器保证 Paho 回调和失败路径不抛异常。只记录稳定事件/分类以及可选 recognitionId/deviceId；后台连接事件使用固定非敏感 `requestId=system`，不记录密码、完整 Broker URI、完整 Payload 或 Paho 原始异常文本。
 
 启动恢复是唯一特例：本次启动从 PROCESSING 改成 `FAILED/SERVER_RESTARTED` 的记录保存在内存列表；MQTT 首次连通时每条尽力发布一次，调用返回后从列表删除，不论成功失败都不再重试。
 
