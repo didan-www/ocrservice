@@ -195,15 +195,19 @@ Crow 并发数保持小而固定以适配教学负载。MySQL 使用有界连接
 
 ### 7.1 领域类型
 
-- `RecognitionId`、`CaptureId`：经严格 UUID 解析的值对象。
-- `DeviceId`：1 至 64 字符，不能作为文件路径。
+- `Uuid`：只接受无花括号 canonical 36 字符输入，十六进制大小写均可；拒绝 nil、非 RFC variant 和 version 0，接受 version 1 至 8；内部保存 16 字节并统一输出小写。服务端生成值固定为 v4。
+- `RecognitionId`、`CaptureId`：基于严格 `Uuid` 的不同值对象，防止相互误用。
+- `DeviceId`：区分大小写并原样保存，严格匹配 ASCII `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`，不能作为文件路径。
 - `RecognitionStatus`：`PROCESSING/SUCCEEDED/FAILED`。
 - `GateAction`：`OPEN/KEEP_CLOSED`，仅设备消息使用。
 - `RecognitionSnapshot`：与 Qt 精确 DTO 一一对应。
-- `RecognitionTask`：只含 `recognitionId` 和内部必要定位信息，不保存完整上传请求。
-- `RecognitionOutcome`：成功车牌或稳定失败码；不包含 HTTP 信息。
-- `HistoryFilter`、`AccessListFilter`：已校验并转换为 UTC 的查询条件。
-- `PlateNumber`：通过 `text` 模块严格解码 UTF-8，按 Unicode code point 执行首尾空白去除、ASCII 大写、内部空白拒绝和 1 至 16 字符校验；长度不能按 UTF-8 字节数计算。Unicode 空白判定固定使用 utf8proc 对应版本，并用 Qt 合法/非法 fixture 做跨语言回归，禁止各控制器自行调用 ASCII `isspace`。
+- `RecognitionTask`：只含 `recognitionId`，不保存完整上传请求；start gate 属于 TASK-005 的队列包装而不是领域任务。
+- `RecognitionOutcome`：tagged union，成功分支只含规范化 `PlateNumber`，失败分支只含 `PLATE_NOT_FOUND/PLATE_RECOGNITION_FAILED/MODEL_INFERENCE_ERROR`；不包含 HTTP 信息或自由错误文本。`SERVER_RESTARTED` 只用于启动恢复，不属于模型结果。
+- `HistoryFilter`：`startInclusiveUtc/endExclusiveUtc/optional<DeviceId>`，构造时保证 `start < end`；分页和 CSV 复用该筛选。
+- `AccessListFilter`：`AccessListType + PlateKeyword`；keyword 执行与车牌相同的 UTF-8、首尾空白和 ASCII 大写处理但允许为空，不能复用非空 `PlateNumber`。
+- `PageRequest`：只保存从 1 开始的 safe integer `page`；`pageSize=100` 是领域常量而不是可变字段。
+- `PlateNumber`：通过 `text` 模块严格解码 UTF-8，按 Unicode code point 执行首尾空白去除、ASCII 大写、内部空白拒绝和 1 至 16 字符校验；长度不能按 UTF-8 字节数计算。Unicode 空白固定为 utf8proc 类别 `Zs/Zl/Zp` 加 U+0009 至 U+000D 和 U+0085，并用 Qt 合法/非法 fixture 做跨语言回归，禁止各控制器自行调用 ASCII `isspace`。
+- `BgrImageView`：严格校验的非持有 BGR8 字节视图，只含数据指针、字节数、宽、高和行跨度；不包含 OpenCV 类型。
 
 ### 7.2 关键接口
 
@@ -212,16 +216,38 @@ class IRecognitionRepository {
 public:
     virtual std::optional<RecognitionRecord> findByCapture(
         const DeviceId&, const CaptureId&) = 0;
-    virtual void insertProcessing(Transaction&, const NewRecognition&) = 0;
-    virtual RecognitionRecord finalize(
-        Transaction&, const RecognitionId&, const RecognitionOutcome&) = 0;
+    virtual RecognitionRecord insertProcessing(const NewRecognition&) = 0;
+    virtual RecognitionRecord finalize(const FinalizeRecognition&) = 0;
     virtual std::vector<RecognitionRecord> failInterruptedOnStartup(
-        Transaction&, TimePoint completedAt) = 0;
+        UtcTimePoint completedAt) = 0;
+    virtual PageResult<RecognitionRecord> queryHistory(
+        const HistoryFilter&, const PageRequest&) = 0;
+    virtual HistoryCursorResult visitHistory(
+        const HistoryFilter&, const HistoryVisitor&) = 0;
+};
+
+class IAdminUserRepository {
+public:
+    virtual std::optional<AdminUserRecord> findByUsername(std::string_view) = 0;
+};
+
+class IDeviceRepository {
+public:
+    virtual std::optional<DeviceRecord> findByHttpTokenHash(const Sha256Digest&) = 0;
+};
+
+class IAccessListRepository {
+public:
+    virtual PageResult<AccessListRecord> query(
+        const AccessListFilter&, const PageRequest&) = 0;
+    virtual std::optional<AccessListRecord> lookup(const PlateNumber&) = 0;
+    virtual AccessListInsertResult insert(const NewAccessListRecord&) = 0;
+    virtual bool remove(std::uint64_t id) = 0;
 };
 
 class IPlateRecognizer {
 public:
-    virtual RecognitionOutcome recognize(const cv::Mat& bgrImage) = 0;
+    virtual RecognitionOutcome recognize(BgrImageView bgrImage) = 0;
 };
 
 class IImageStorage {
@@ -239,7 +265,17 @@ public:
 };
 ```
 
-接口返回领域结果或显式错误，不抛出带 SQL、密码、绝对路径的异常到控制器。基础设施异常在 service 边界映射为稳定业务错误和脱敏技术日志。
+以上接口是领域 Port，不允许出现 OpenCV、ONNX Runtime、Crow、MySQL Connector、Paho 或其他基础设施库类型。模型适配器只在 `src/model` 内把 `BgrImageView` 包装成 `cv::Mat` 视图。
+
+`NewRecognition` 包含 `recognitionId/deviceId/captureId/imageSha256/relativeImagePath/imageMime/imageSizeBytes/capturedAtUtc/startedAtUtc`；初始状态、revision 和 null 组合由 Repository 固定。`RecognitionRecord` 由公开快照和 `captureId/imageSha256/relativeImagePath/imageMime/imageSizeBytes` 组成。`RelativeImagePath` 是不透明的规范化相对路径，拒绝绝对路径、空段、`.`、`..`、反斜杠和 NUL。
+
+`SaveImageCommand` 只含服务端生成的 `recognitionId`、UTC 拍摄时间、已确认图片格式、压缩字节视图和 SHA-256；`StoredImage` 只返回相对路径、MIME、大小和 SHA-256；`ImageFile` 是不暴露绝对路径或原生文件描述符的 move-only RAII 读取句柄。具体存储实现仍归 `src/storage`。
+
+`PublishAttempt` 只表示 accepted 或带稳定技术分类的 rejected，不包含 Paho token、异常或错误文本。Repository 错误同样使用稳定分类，不泄漏 SQL 异常。
+
+管理员、设备、历史和名单 Repository Port 也在领域层一次性声明，供后续 TASK-009、TASK-010、TASK-015 和 TASK-016 实现或调用，后续任务不得回头修改 TASK-003 所有的领域目录。分页统一返回 `PageResult<T>`；CSV 使用按固定排序逐条访问的 `HistoryVisitor` 和 `HistoryCursorResult`，回调可以在 HTTP 断流时停止读取。名单新增结果显式区分成功、已有名单类型冲突和 Repository 技术失败。
+
+SQL transaction 对象不得出现在领域 API。每个 Repository 方法在内部保证该方法所需的事务原子性，service 只组织跨 Port 的业务调用、状态转换和补偿顺序。接口返回领域结果或显式错误，不抛出带 SQL、密码、绝对路径的异常到控制器。基础设施异常在 service 边界映射为稳定业务错误和脱敏技术日志。
 
 ## 8. HTTP 架构
 
@@ -273,7 +309,7 @@ nlohmann/json 只作为语法树和序列化工具，不直接对外暴露。每
 
 响应不使用反射式“序列化所有成员”。每个 DTO 有显式 `toJsonExact()`，按 `REQ-001` 构造固定字段；可空字段始终写 `null`。统一 `EnvelopeWriter` 是五字段信封的唯一生成入口。
 
-所有 JSON 整数在序列化前执行 safe integer 检查。时间模块只接受毫秒精度、偏移严格为 `+08:00` 的 ISO 8601，转换为 UTC 后进入 Repository；输出统一生成 `.SSS+08:00`，不依赖宿主机时区。
+所有 JSON 整数在序列化前执行 safe integer 检查。时间模块只接受 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`，年份为 1000 至 9999，并拒绝非法日历日期和闰秒；转换为 UTC 后进入 Repository，输出统一生成 `.SSS+08:00`，不依赖宿主机时区。
 
 查询参数由统一 `StrictQueryDecoder` 从原始 query string 解析。Qt 端按 UTF-8 生成百分号编码；服务端只把 `%HH` 解码一次，再执行严格 UTF-8 校验，禁止二次解码。`+` 始终是字面加号，不能按 `application/x-www-form-urlencoded` 规则转换为空格，因此 `+08:00` 时间既可原样传输，也可编码为 `%2B08%3A00`。非法百分号、非法 UTF-8、重复参数、未知参数或缺少必填参数统一返回 `INVALID_REQUEST`。
 
