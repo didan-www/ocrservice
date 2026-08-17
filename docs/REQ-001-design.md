@@ -311,7 +311,7 @@ JSON 请求的媒体类型按 ASCII 大小写不敏感匹配 `application/json`�
 
 响应不使用反射式“序列化所有成员”。每个 DTO 有显式 `toJsonExact()`，按 `REQ-001` 构造固定字段；可空字段始终写 `null`。统一 `EnvelopeWriter` 是五字段信封的唯一生成入口。
 
-所有 JSON 整数在序列化前执行 safe integer 检查。时间模块只接受 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`，年份为 1000 至 9999，并拒绝非法日历日期和闰秒；转换为 UTC 后进入 Repository，输出统一生成 `.SSS+08:00`，不依赖宿主机时区。
+所有 JSON 整数在序列化前执行 safe integer 检查。时间模块只接受 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`，范围为 `1000-01-01T08:00:00.000+08:00` 至 `9999-12-31T23:59:59.999+08:00`（含两端），并拒绝非法日历日期和闰秒；协议下界精确对应 MySQL `DATETIME(3)` 可表示的最小 UTC 时间 `1000-01-01 00:00:00.000`。转换为 UTC 后进入 Repository，输出统一生成 `.SSS+08:00`，不依赖宿主机时区。
 
 `plateNumber`、`remark` 和 `errorMessage` 的长度统一按 UTF-8 解码后的 Unicode 码点计数，与 MySQL `utf8mb4` 的 `CHAR_LENGTH` 口径一致，不按 UTF-8 字节数或 UTF-16 code unit 计数。`plate_client` 当前基于 `QString::size()` 的校验使用 UTF-16 code unit；必须在该项目 Qt TASK-011 开始前修正 codec 和边界测试，使补充平面字符与本契约一致，修复完成前不得进入该任务。
 

@@ -94,16 +94,21 @@ UtcTimePoint parseProtocolTime(const std::string_view input) {
         daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) *
             kSecondsPerDay +
         hour * 3600 + minute * 60 + second;
-    return UtcTimePoint(
-        (localSeconds - kOffsetSeconds) * kMillisecondsPerSecond + millisecond);
+    const auto utcMilliseconds =
+        (localSeconds - kOffsetSeconds) * kMillisecondsPerSecond + millisecond;
+    const auto minimumUtcMilliseconds =
+        daysFromCivil(1000, 1U, 1U) * kSecondsPerDay * kMillisecondsPerSecond;
+    if (utcMilliseconds < minimumUtcMilliseconds) {
+        throw TimeError("protocol time is earlier than the supported UTC range");
+    }
+    return UtcTimePoint(utcMilliseconds);
 }
 
 std::string formatProtocolTime(const UtcTimePoint timePoint) {
     constexpr std::int64_t kMillisecondsPerDay =
         kSecondsPerDay * kMillisecondsPerSecond;
     const auto minimumUtcMilliseconds =
-        daysFromCivil(1000, 1U, 1U) * kMillisecondsPerDay -
-        kOffsetSeconds * kMillisecondsPerSecond;
+        daysFromCivil(1000, 1U, 1U) * kMillisecondsPerDay;
     const auto maximumUtcMillisecondsExclusive =
         daysFromCivil(10000, 1U, 1U) * kMillisecondsPerDay -
         kOffsetSeconds * kMillisecondsPerSecond;

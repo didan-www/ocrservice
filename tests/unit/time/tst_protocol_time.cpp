@@ -24,7 +24,7 @@ TEST(ProtocolTimeTest, ParsesToUtcMillisecondsAndFormatsFixedOffset) {
 
 TEST(ProtocolTimeTest, AcceptsLeapDaysAndYearBoundaries) {
     for (const std::string value : {
-             "1000-01-01T00:00:00.000+08:00",
+             "1000-01-01T08:00:00.000+08:00",
              "2000-02-29T23:59:59.999+08:00",
              "2024-02-29T12:00:00.123+08:00",
              "9999-12-31T23:59:59.999+08:00",
@@ -51,6 +51,16 @@ TEST(ProtocolTimeTest, RejectsNonExactFormatOffsetAndLeapSecond) {
     }
 }
 
+TEST(ProtocolTimeTest, LowerBoundMatchesMySqlDatetimeUtcRange) {
+    constexpr std::int64_t kMySqlDatetimeMinimumUtcMilliseconds = -30610224000000LL;
+    const auto minimum = parseProtocolTime("1000-01-01T08:00:00.000+08:00");
+    EXPECT_EQ(minimum.unixMilliseconds(), kMySqlDatetimeMinimumUtcMilliseconds);
+    EXPECT_EQ(formatProtocolTime(minimum), "1000-01-01T08:00:00.000+08:00");
+
+    EXPECT_THROW(parseProtocolTime("1000-01-01T07:59:59.999+08:00"), TimeError);
+    EXPECT_THROW(parseProtocolTime("1000-01-01T00:00:00.000+08:00"), TimeError);
+}
+
 TEST(ProtocolTimeTest, RejectsInvalidCalendarAndClockFields) {
     for (const std::string value : {
              "2026-00-01T00:00:00.000+08:00",
@@ -65,7 +75,7 @@ TEST(ProtocolTimeTest, RejectsInvalidCalendarAndClockFields) {
 }
 
 TEST(ProtocolTimeTest, FormattingRejectsLocalYearsOutsideContract) {
-    const auto first = parseProtocolTime("1000-01-01T00:00:00.000+08:00");
+    const auto first = parseProtocolTime("1000-01-01T08:00:00.000+08:00");
     EXPECT_THROW(formatProtocolTime(UtcTimePoint(first.unixMilliseconds() - 1)), TimeError);
     const auto last = parseProtocolTime("9999-12-31T23:59:59.999+08:00");
     EXPECT_THROW(formatProtocolTime(UtcTimePoint(last.unixMilliseconds() + 1)), TimeError);
