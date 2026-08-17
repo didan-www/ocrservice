@@ -636,7 +636,55 @@ compiled teaching defaults
 
 四个 MQTT 环境变量是应用与 Broker 静态账号的唯一事实来源。教学 Compose 的 `app` 与 `mqtt` 服务必须读取同一份 `.env`/secret；禁止再维护另一份手工密码副本。`mqtt` 容器入口在启动 Broker 前执行 `init-mosquitto.sh`，使用 `mosquitto_passwd` 更新 password 文件并原子生成基础 ACL：服务端发布账号只允许写管理主题和设备结果主题，管理端账号只允许读管理主题。设备账号和设备 ACL 由 `provision-device.sh` 维护在独立片段中，再与基础 ACL 原子合并。
 
-初始化脚本必须校验四项非空、用户名不重复、目标文件权限和 `mosquitto_passwd` 返回值；失败则 Broker 不启动。脚本和 Compose 日志不得输出密码。应用只读取同源变量用于 Paho 连接和登录响应，不负责创建 Broker 用户。端到端验收必须使用一次真实登录返回的 MQTT 凭据完成 CONNECT 和管理主题 SUBACK，以发现 password/ACL 漂移。
+初始化脚本必须拒绝任何命令行参数，校验四项环境变量非空、用户名不重复、目标文件权限和 `mosquitto_passwd` 返回值；失败则 Broker 不启动。ACL template 必须逐字等于设计确认的六行占位模板，渲染结果也必须逐字等于确认的 base ACL，不能通过 override 增加、删除或变形权限行。脚本和 Compose 日志不得输出密码。应用只读取同源变量用于 Paho 连接和登录响应，不负责创建 Broker 用户。端到端验收必须使用一次真实登录返回的 MQTT 凭据完成 CONNECT 和管理主题 SUBACK，以发现 password/ACL 漂移。
+
+应用配置加载器和 Broker 初始化脚本都必须要求静态 MQTT 用户名匹配 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`，并拒绝服务端、管理端用户名相同的配置。用户名匹配按 ASCII 字节和大小写精确比较。
+
+### 16.1 Mosquitto 安全文件与脚本运行模型
+
+Mosquitto 可写持久化根默认为 `/mosquitto/data/security`，测试可通过 `MOSQUITTO_SECURITY_ROOT` 覆盖。固定布局为：
+
+```text
+password_file
+acl.base
+devices/<sha256(deviceId)>.acl
+acl_file
+.security.lock
+```
+
+安全目录和 `devices` 目录 mode 为 `0700`，password 和 lock 文件为 `0600`，基础 ACL、设备片段和合并 ACL 为 `0640`，文件所有者为 Mosquitto 运行用户。两个脚本使用同一个 `.security.lock` 和 `flock`，锁等待上限由 `MOSQUITTO_LOCK_TIMEOUT_SECONDS` 配置且默认 60 秒；锁覆盖完整文件收敛流程，设备开通时覆盖 MySQL、文件、reload 和摘要写入。
+
+所有持久文件都先在目标目录创建不可预测临时文件，写入并 fsync 后原子 rename，再 fsync 父目录。password 更新复制现有文件到临时文件后只对临时文件运行 `mosquitto_passwd`。设备 ACL 片段文件名是小写 `sha256(deviceId)`，合并时按片段文件名稳定排序并严格验证每个片段恰好包含一个 user 和一个精确 read topic。静态或设备用户名重复、片段格式漂移均停止初始化或开通。
+
+基础 ACL 精确为：
+
+```text
+user <MQTT_SERVER_USERNAME>
+topic write plate/management/recognition-events
+topic write plate/devices/+/recognition-results
+
+user <MQTT_MANAGEMENT_USERNAME>
+topic read plate/management/recognition-events
+```
+
+设备片段精确为：
+
+```text
+user <mqttUsername>
+topic read plate/devices/<deviceId>/recognition-results
+```
+
+Mosquitto 2.0.11 内置 ACL 不提供独立的 subscribe ACL 类型。管理端和设备端必须配置上述完整主题，但 Broker 对更宽通配符 filter 可能返回成功 SUBACK，再对每条消息应用精确 read ACL。组件测试必须让管理端和设备端实际使用通配符订阅，同时向授权精确主题及多个越权主题发布探测消息，并证明只交付授权主题。服务端基础 ACL 保持仅有两条 write 权限，不增加 read。
+
+`mosquitto.conf` 固定 `allow_anonymous false`，引用上述 password 和合并 ACL，并启用 persistence。Broker pid file 默认为 `/mosquitto/data/mosquitto.pid`。设备开通脚本只允许在与 Broker 相同 PID namespace 内读取 pid file，枚举 `/proc/[0-9]*/comm` 并确认当前 namespace 恰好存在一个存活的 `mosquitto` 进程，且其 PID 与 pid file 完全相同后才发送 `SIGHUP`；零个、多个或 pid 不匹配均失败。不执行 shell 字符串形式的 reload 命令，也不把容器重启伪装为 reload。
+
+### 16.2 设备开通事务和数据编码
+
+`provision-device.sh` 在共享锁内依次执行输入校验、MySQL 事务、password 原子替换、设备片段与合并 ACL 原子替换、SIGHUP 和摘要文件输出。固定必选参数为 `--device-id/--device-name/--mqtt-username/--http-token-file/--mqtt-password-file/--http-base-url/--output`，只有 `--rotate` 可选；独立 seen 状态拒绝所有重复 option，包括首次为空的情况。`--output` 不接受 `-`、控制字符或 symlink，规范化后不得与 secret 输入为同一文件、位于安全根内或等于 pid/template 路径，stdout 不输出 secret JSON。开通前再次把 template、渲染结果和现有 base ACL 分别与 canonical 内容精确比较。MySQL 事务先按 `device_id` 锁定读取，再按需求规定的幂等/轮换矩阵执行显式 insert 或 update；不得使用会隐藏唯一键冲突的宽松 upsert。
+
+脚本通过严格校验和十六进制 SQL 字面量传递设备 ID、名称、HTTP SHA-256 和 MQTT 用户名，不把原始输入拼接为引号字符串。MySQL 密码只通过继承的进程环境传给客户端、Docker 和 PID namespace 测试进程，不以 `NAME=value` 或其他形式出现在 argv。新建设备写入两个 UTC 时间；重新启用或轮换只更新必要字段和 `updated_at`。
+
+部分失败不执行跨 MySQL/文件系统回滚。每个阶段成功后更新内存中的最后完成阶段，错误处理只把该阶段和稳定技术类别写到 stderr。数据库已经提交、文件已经替换或 Broker 已经 reload 的状态都由相同输入重跑收敛。摘要写入失败时 Broker 和数据库状态保持有效，重跑只重新收敛并输出摘要。
 
 `MQTT_PUBLIC_HOST` 是 Qt 可访问地址，不能自动使用 Compose 服务名 `mqtt`。启动只校验非空，部署验收通过真实 Qt 连接验证可达性。
 

@@ -231,6 +231,35 @@ TEST(ServerConfigLoaderTest, RequiresAllSecretsAndPublicMqttHost) {
     EXPECT_THROW(ServerConfigLoader::load(missingFile, environment), ConfigError);
 }
 
+TEST(ServerConfigLoaderTest, RequiresSafeDistinctMqttUsernames) {
+    const auto missingFile = std::filesystem::temp_directory_path() /
+                             "ocrservice-config-file-that-does-not-exist.json";
+    for (const auto& [name, value] : {
+             std::pair{"MQTT_SERVER_USERNAME", ""},
+             std::pair{"MQTT_SERVER_USERNAME", "-server"},
+             std::pair{"MQTT_SERVER_USERNAME", "server/user"},
+             std::pair{"MQTT_SERVER_USERNAME", "server+user"},
+             std::pair{"MQTT_SERVER_USERNAME", "server user"},
+             std::pair{"MQTT_MANAGEMENT_USERNAME", ".management"},
+             std::pair{"MQTT_MANAGEMENT_USERNAME", "management\nuser"},
+             std::pair{"MQTT_MANAGEMENT_USERNAME",
+                       "management-user-that-is-longer-than-sixty-four-ascii-characters-000"},
+         }) {
+        auto environment = requiredEnvironment();
+        environment[name] = value;
+        EXPECT_THROW(ServerConfigLoader::load(missingFile, environment), ConfigError)
+            << name << '=' << value;
+    }
+
+    auto environment = requiredEnvironment();
+    environment["MQTT_SERVER_USERNAME"] = "same-user";
+    environment["MQTT_MANAGEMENT_USERNAME"] = "same-user";
+    EXPECT_THROW(ServerConfigLoader::load(missingFile, environment), ConfigError);
+
+    environment["MQTT_MANAGEMENT_USERNAME"] = "Same-user";
+    EXPECT_NO_THROW(ServerConfigLoader::load(missingFile, environment));
+}
+
 TEST(ServerConfigLoaderTest, SummaryHasExactNonSensitiveFields) {
     const auto missingFile = std::filesystem::temp_directory_path() /
                              "ocrservice-config-file-that-does-not-exist.json";

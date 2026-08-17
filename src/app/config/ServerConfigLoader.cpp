@@ -154,6 +154,27 @@ std::optional<std::string_view> environmentValue(
     return found->second;
 }
 
+bool isValidMqttUsername(const std::string_view value) {
+    if (value.empty() || value.size() > 64U) {
+        return false;
+    }
+    const auto isAlphaNumeric = [](const char character) {
+        return (character >= 'A' && character <= 'Z') ||
+               (character >= 'a' && character <= 'z') ||
+               (character >= '0' && character <= '9');
+    };
+    if (!isAlphaNumeric(value.front())) {
+        return false;
+    }
+    for (const char character : value) {
+        if (!isAlphaNumeric(character) && character != '.' && character != '_' &&
+            character != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::uint64_t parseEnvironmentUnsigned(
     const std::string_view value,
     const std::string_view name,
@@ -307,6 +328,15 @@ void applyEnvironment(ServerConfig& config, const ServerConfigLoader::Environmen
 void validateFinal(const ServerConfig& config) {
     if (config.mqtt.publicHost.empty()) {
         throw ConfigError("mqttPublicHost must be provided by JSON or MQTT_PUBLIC_HOST");
+    }
+    if (!isValidMqttUsername(config.mqtt.serverUsername)) {
+        throw ConfigError("mqttServerUsername is invalid");
+    }
+    if (!isValidMqttUsername(config.mqtt.managementUsername)) {
+        throw ConfigError("mqttManagementUsername is invalid");
+    }
+    if (config.mqtt.serverUsername == config.mqtt.managementUsername) {
+        throw ConfigError("MQTT server and management usernames must be distinct");
     }
 }
 

@@ -1,0 +1,6 @@
+user {{MQTT_SERVER_USERNAME}}
+topic write plate/management/recognition-events
+topic write plate/devices/+/recognition-results
+
+user {{MQTT_MANAGEMENT_USERNAME}}
+topic read plate/management/recognition-events
