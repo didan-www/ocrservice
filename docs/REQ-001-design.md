@@ -307,9 +307,13 @@ nlohmann/json 只作为语法树和序列化工具，不直接对外暴露。每
 3. 再逐字段验证 JSON 类型、长度、枚举、范围和组合状态。
 4. 禁止隐式字符串转数字、数字转字符串或缺字段默认值。
 
+JSON 请求的媒体类型按 ASCII 大小写不敏感匹配 `application/json`。只接受无参数，或唯一的 `charset=utf-8` 参数；参数名和值同样大小写不敏感。其他参数、重复参数和非 UTF-8 charset 在进入 decoder 前映射为 `INVALID_REQUEST`。JSON 响应始终输出精确的 `application/json`。
+
 响应不使用反射式“序列化所有成员”。每个 DTO 有显式 `toJsonExact()`，按 `REQ-001` 构造固定字段；可空字段始终写 `null`。统一 `EnvelopeWriter` 是五字段信封的唯一生成入口。
 
 所有 JSON 整数在序列化前执行 safe integer 检查。时间模块只接受 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`，年份为 1000 至 9999，并拒绝非法日历日期和闰秒；转换为 UTC 后进入 Repository，输出统一生成 `.SSS+08:00`，不依赖宿主机时区。
+
+`plateNumber`、`remark` 和 `errorMessage` 的长度统一按 UTF-8 解码后的 Unicode 码点计数，与 MySQL `utf8mb4` 的 `CHAR_LENGTH` 口径一致，不按 UTF-8 字节数或 UTF-16 code unit 计数。`plate_client` 当前基于 `QString::size()` 的校验使用 UTF-16 code unit；必须在该项目 Qt TASK-011 开始前修正 codec 和边界测试，使补充平面字符与本契约一致，修复完成前不得进入该任务。
 
 查询参数由统一 `StrictQueryDecoder` 从原始 query string 解析。Qt 端按 UTF-8 生成百分号编码；服务端只把 `%HH` 解码一次，再执行严格 UTF-8 校验，禁止二次解码。`+` 始终是字面加号，不能按 `application/x-www-form-urlencoded` 规则转换为空格，因此 `+08:00` 时间既可原样传输，也可编码为 `%2B08%3A00`。非法百分号、非法 UTF-8、重复参数、未知参数或缺少必填参数统一返回 `INVALID_REQUEST`。
 
@@ -715,6 +719,8 @@ recognitionId?, deviceId?, durationMs?
 - 精确字段集合、五字段信封、null 组合和 safe integer。
 - `+08:00` 时间解析、UTC 转换、毫秒输出和 `[start,end)`。
 - UUID、设备 ID、UTF-8/Unicode 车牌规范化、LIKE 转义和 CSV 转义。
+- JSON 请求 Content-Type 大小写、唯一 UTF-8 charset、重复/未知参数拒绝，以及 JSON 响应固定媒体类型。
+- `plateNumber`、`remark`、`errorMessage` 的中文和补充平面 Unicode 码点边界。
 - query 单次百分号解码、`+08:00`、中文、`%`、`_`、`\`、重复键和非法 UTF-8。
 - 状态转换、revision、GateAction 映射。
 - YOLO letterbox/NMS/坐标还原和 LPRNet 转置/CTC/字符表。
