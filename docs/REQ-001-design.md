@@ -554,6 +554,8 @@ CREATE TABLE schema_migrations (
 
 - 所有 SQL 使用 prepared statement 参数绑定。
 - 数据库连接建立后选择配置 schema 并执行 `SET time_zone = '+00:00'`；租约归还时无条件 rollback，再恢复 schema、autocommit 和 UTC 时区。
+- 每个具体 Repository 通过构造选项持有正数租约等待时限，默认 5 秒，并在每次方法调用时显式传给连接池。获取超时、连接池关闭或补连失败统一为 `RepositoryFailure::unavailable`。
+- SQLSTATE `08` 类及 MySQL 2006/2013 必须 discard 租约并映射 `unavailable`；事务 commit 抛异常时结果未知，也必须 discard 并映射 `unavailable`。1205/1213 映射 `unavailable` 但允许 rollback/reset 后复用连接。识别唯一键 1062 映射 `conflict`，名单车牌唯一键进入冲突读取流程，预期外键 1452 映射 `notFound`，其余约束、语法和 mapper invariant 映射 `internal`。
 - `DATETIME(3)` 只映射 UTC time point。
 - 行到领域对象的映射集中在 Repository mapper，并复验状态组合。
 - 识别分页固定 `captured_at DESC, recognition_id DESC`。
@@ -569,7 +571,13 @@ SET revision = revision + 1, status = ?, ...
 WHERE recognition_id = ? AND status = 'PROCESSING';
 ```
 
-受影响行数必须为 1，然后在同一事务读取最终记录。名单新增依赖全局唯一键处理并再次查询冲突记录的 `list_type`，映射为 WHITE 或 BLACK 稳定错误码。
+事务先用 `SELECT ... FOR UPDATE` 区分不存在的 `notFound` 和已完成的 `stateConflict`，再执行上述条件更新；受影响行数必须为 1，然后在同一事务读取最终记录。模型失败自由文本由 Repository 集中生成，依次为“未检测到车牌”“车牌识别失败”“模型推理失败”。
+
+启动恢复在单事务中锁定所有遗留 PROCESSING，revision 加一并写入 `SERVER_RESTARTED` 和“服务重启，识别任务已中断”。每行使用 `effectiveCompletedAt=max(completedAtUtc, startedAtUtc)` 写入完成时间，并以 `effectiveCompletedAt-startedAtUtc` 的 UTC 墙钟毫秒差作为 `durationMs`；这是无法跨重启延续单调时钟时的唯一例外，同时保持 `completedAt>=startedAt`。
+
+历史分页和名单分页的 `COUNT` 与 items 查询分别运行在同一个 `REPEATABLE READ` 只读一致性快照中。CSV visitor 也持有这样的只读事务和流式结果集；`recordsVisited` 计入已传给回调的当前行，回调返回 false 时 `fullyConsumed=false`，包括当前行恰为末行的情况。回调异常在 rollback 后原样传播，驱动或 mapper 异常映射为稳定 Repository failure。
+
+名单新增依赖全局唯一键。1062 后在事务中锁定查询冲突记录的 `list_type`，映射为 WHITE 或 BLACK；若该行已被并发删除，则 rollback 并只重试一次插入，重试成功返回新记录，仍无法稳定解析冲突时返回 `unavailable`。
 
 ## 15. MQTT 架构
 
