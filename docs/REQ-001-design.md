@@ -187,7 +187,7 @@ Application
 | Paho 内部线程 | 由库管理 | MQTT 网络回调 |
 | MQTT 重连控制 | 1 | 退避连接和首次恢复发布 |
 
-Crow 并发数保持小而固定以适配教学负载。MySQL 使用有界连接池，默认 6 个连接；每次 Repository 调用通过 RAII 租约独占一个连接，事务结束归还。连接不可跨线程共享。
+Crow 并发数保持小而固定以适配教学负载。MySQL 使用固定 6 个连接的有界连接池；启动使用一个共享 60 秒连接预算建立全部 6 个连接，每个连接建立后选择配置 schema 并执行 `SET time_zone = '+00:00'`。每次 Repository 调用通过带调用方超时的 RAII 租约独占一个连接，连接不可跨线程共享。租约归还前无条件执行 rollback 并恢复 autocommit、配置 schema 和 UTC 会话时区；坏连接被丢弃并在预算内补建，连接池关闭会唤醒所有等待者。租约持有共享池状态而不是连接池对象裸指针，因此连接池对象先关闭或析构后，存量租约仍能安全关闭连接并归还计数，不访问悬空 owner。
 
 `ModelRuntime` 在启动后只读。默认只有一个识别 worker，因此两个 ONNX Session 不需要外部并发锁；若把 `RECOGNITION_WORKERS` 调大，每个 worker 独立持有两个 Session，避免共享可变输入缓冲区。
 
@@ -537,14 +537,23 @@ CREATE TABLE schema_migrations (
 ) ENGINE=InnoDB;
 ```
 
-它不属于业务表。迁移器按文件名前缀排序，使用 MySQL advisory lock 防止并发执行；已执行版本必须匹配文件名和 SHA-256，checksum 不同则启动失败。每个迁移尽可能使用事务，但考虑 MySQL DDL 隐式提交，迁移脚本必须幂等且一次只推进一个版本。
+它不属于业务表。`MYSQL_DATABASE` 对应的 schema 由 Compose 或运维预创建，应用账号不需要建库权限；迁移器只连接并迁移该配置 schema，不执行 `CREATE DATABASE`、`USE` 或跨 schema DDL。
 
-`001_initial.sql` 创建 `REQ-001` 的四张业务表和固定演示数据。重复启动不得重置密码、修改已有凭据或清空业务记录。
+文件发现和历史验证固定如下：
+
+1. 文件名严格匹配 `^[0-9]{3}_[A-Za-z0-9_]+\\.sql$`，三位版本必须大于 0，`schema_migrations.name` 保存含 `.sql` 的完整文件名。
+2. 按数值版本升序执行；拒绝重复版本。版本可向前留空洞，但禁止在数据库已应用最大版本以下回填新文件。
+3. 每个已应用版本必须仍存在对应文件，且完整文件名和原始文件字节 SHA-256 都与数据库记录相同；缺失、改名或 checksum 漂移均启动失败。
+4. 迁移器在专用连接上 bootstrap 并通过 `information_schema` 精确验证 `schema_migrations`。advisory lock 名为固定前缀加配置数据库名 SHA-256，长度不超过 MySQL 64 字节；该连接从 `GET_LOCK` 成功到最终 `RELEASE_LOCK` 始终独占，不归还连接池。
+5. 锁等待预算固定 60 秒，与建立连接池的 60 秒重试预算独立。`GET_LOCK` 明确返回 0 时按超时失败；返回 `NULL`、结果异常或连接中断时无法证明服务端未授锁，必须丢弃连接后使 migration 失败。释放返回异常同样丢弃连接并失败。
+6. 迁移器先通过 `information_schema.SCHEMATA` 精确验证配置 schema 的默认字符集和排序规则。每个迁移先执行可重复的 DDL 和 seed，再精确校验 `schema_migrations` 及四张业务表的列、类型、可空性、默认值、索引、外键、CHECK、engine、字符集和排序规则，最后参数化插入版本记录。考虑 MySQL DDL 隐式提交，任一步中断后都由下次启动安全补完；结构校验通过前不得推进版本。
+
+`001_initial.sql` 在当前配置 schema 中创建 `REQ-001` 的四张业务表和固定演示数据。管理员使用固定 bcrypt `$2b$12$` 摘要；设备名固定为“入口设备”，HTTP Token 使用固定 SHA-256 摘要，MQTT 用户名为 `device-001`；首次时间为 `UTC_TIMESTAMP(3)`。固定主键已存在时完全不更新。若管理员用户名 `admin` 被其他主键占用，或固定 Token 摘要、MQTT 用户名被其他设备占用则启动失败，不能用 `INSERT IGNORE` 或额外存在性条件隐藏冲突。重复启动不得重置密码、修改已有凭据或清空业务记录。
 
 ### 14.2 Repository 规则
 
 - 所有 SQL 使用 prepared statement 参数绑定。
-- 数据库连接建立后执行 `SET time_zone = '+00:00'`。
+- 数据库连接建立后选择配置 schema 并执行 `SET time_zone = '+00:00'`；租约归还时无条件 rollback，再恢复 schema、autocommit 和 UTC 时区。
 - `DATETIME(3)` 只映射 UTC time point。
 - 行到领域对象的映射集中在 Repository mapper，并复验状态组合。
 - 识别分页固定 `captured_at DESC, recognition_id DESC`。
@@ -632,8 +641,9 @@ load and validate config
  -> initialize logger
  -> validate/create image and log roots
  -> hash, load and validate both ONNX models
- -> connect MySQL with retry, maximum 60 seconds
- -> acquire migration lock and migrate/verify
+ -> establish all six MySQL pool connections with one shared 60-second retry budget
+ -> use a dedicated connection and an independent 60-second migration-lock budget
+ -> migrate and verify the configured pre-created schema
  -> transactionally fail stale PROCESSING rows
  -> create repositories/services/queue
  -> start recognition workers
@@ -641,7 +651,7 @@ load and validate config
  -> start MQTT background connection
 ```
 
-MySQL 60 秒持续不可用、migration 失败或模型不匹配时进程以非零状态退出。MQTT 不可用时继续启动，`/health` 为 DEGRADED。
+MySQL 在共享连接预算 60 秒内不能建立全部 6 个 UTC 连接、migration lock 在其独立 60 秒预算内不可获得、migration 失败或模型不匹配时进程以非零状态退出。MQTT 不可用时继续启动，`/health` 为 DEGRADED。
 
 HTTP 对外监听前，模型和 MySQL 必须已就绪，避免短暂接受无法处理的请求。
 
