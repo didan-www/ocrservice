@@ -355,18 +355,18 @@ Qt 的总时限从发出请求持续到完整响应体接收完成，服务端�
 
 ### 9.1 密码验证
 
-`AuthService` 通过 `AdminUserRepository` 按用户名查询用户。bcrypt 使用 libxcrypt `crypt_r` 验证；日志中只记录结果码和用户 ID，不记录用户名与密码组合。用户名不存在时执行一次固定 bcrypt 摘要验证，降低明显时序差异。
+`AuthService` 通过 `AdminUserRepository` 按用户名查询用户。用户名必须为 1 至 64 个 Unicode code point；密码必须为 1 至 72 个 UTF-8 字节且不得包含 NUL，形状失败统一作为无效凭据。bcrypt 使用 libxcrypt `crypt_r` 验证，并用 OpenSSL 常量时间函数比较完整定长摘要；用户名不存在时也对编译期固定的有效 `$2b$12$` 摘要执行一次验证，降低明显时序差异。始终先验证密码，再判断 enabled，只有密码正确的禁用用户返回 `USER_DISABLED`。已知用户摘要损坏或 `crypt_r` 失败映射内部错误。Repository `unavailable` 映射 `DATABASE_UNAVAILABLE`，其他 Repository 技术失败映射 `INTERNAL_ERROR`，不得伪装为凭据错误。日志不得记录用户名、密码、Token、bcrypt 摘要、clientId 或原始异常对象。
 
 ### 9.2 Token 生成与存储
 
-登录成功后 OpenSSL `RAND_bytes` 生成 32 字节随机数并编码为不透明 Token。`SessionStore` 只驻留内存，内部维护：
+登录成功后 OpenSSL `RAND_bytes` 生成完整 32 字节随机数并编码为 64 字符小写十六进制不透明 Token。随机源失败映射内部错误；若生成值已存在则重试，绝不覆盖其他会话。`SessionStore` 只驻留内存，内部维护：
 
 - `token -> Session`。
 - `clientId -> token`。
 
-两个索引由同一互斥量保护。同一 `clientId` 新登录时，在同一临界区删除旧 Token 并插入新 Token。Session 保存 user ID、显示名快照、clientId、签发和到期时间。注销立即删除两个索引。鉴权时区分无效与已过期 Token，并惰性清理过期条目。
+两个索引由同一互斥量保护。同一 `clientId` 新登录时，在同一临界区删除旧 Token 并插入新 Token；并发登录最后完成该临界区替换者是唯一有效会话。Session 保存 user ID、显示名快照、clientId、签发和到期时间。注销立即删除 Token 索引，但只有 `clientId` 索引仍指向被注销 Token 时才删除该反向索引，避免旧注销误删并发新登录。鉴权只在 `now < expiresAt` 时成功；`now == expiresAt` 已到期，首次发现返回 expired 并惰性删除，之后同一 Token 返回 invalid。
 
-应用重启后所有 Token 自然失效，符合内存会话约束。心跳只验证 Token、clientId 和请求结构，不刷新到期时间，也不探测依赖。
+时钟和随机源通过接口注入以支持确定性测试。一次登录只读取一个 UTC 毫秒时间对象，由它计算 `expiresAt=issuedAt+TTL` 并供 HTTP/MQTT 响应共同复用。应用重启后所有 Token 自然失效，符合内存会话约束。心跳只验证 Token、clientId 和请求结构，clientId 不匹配映射 `AUTH_TOKEN_INVALID`，不刷新到期时间，也不探测依赖。用户 enabled 只在登录时读取，存量会话不再访问数据库。
 
 ### 9.3 Qt MQTT 逻辑到期
 
