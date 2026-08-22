@@ -334,6 +334,12 @@ using RepositoryResult = PortResult<T, RepositoryFailure>;
 template <typename T>
 using StorageResult = PortResult<T, StorageFailure>;
 
+class IHistoryCursor {
+public:
+    virtual ~IHistoryCursor() = default;
+    virtual RepositoryResult<std::optional<RecognitionRecord>> next() = 0;
+};
+
 class PublishAttempt final {
 public:
     static PublishAttempt accepted() noexcept;
@@ -364,6 +370,8 @@ public:
     virtual RepositoryResult<PageResult<RecognitionRecord>> queryHistory(
         const HistoryFilter& filter,
         const PageRequest& page) = 0;
+    virtual RepositoryResult<std::unique_ptr<IHistoryCursor>> openHistoryCursor(
+        const HistoryFilter& filter) = 0;
     virtual RepositoryResult<HistoryCursorResult> visitHistory(
         const HistoryFilter& filter,
         const HistoryVisitor& visitor) = 0;

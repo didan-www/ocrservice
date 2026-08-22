@@ -214,6 +214,11 @@ HTTP 运行时显式绑定 `0.0.0.0`，监听端口来自配置中的 `HTTP_PORT
 ### 7.2 关键接口
 
 ```cpp
+class IHistoryCursor {
+public:
+    virtual RepositoryResult<std::optional<RecognitionRecord>> next() = 0;
+};
+
 class IRecognitionRepository {
 public:
     virtual std::optional<RecognitionRecord> findByCapture(
@@ -224,6 +229,8 @@ public:
         UtcTimePoint completedAt) = 0;
     virtual PageResult<RecognitionRecord> queryHistory(
         const HistoryFilter&, const PageRequest&) = 0;
+    virtual RepositoryResult<std::unique_ptr<IHistoryCursor>> openHistoryCursor(
+        const HistoryFilter&) = 0;
     virtual HistoryCursorResult visitHistory(
         const HistoryFilter&, const HistoryVisitor&) = 0;
 };
@@ -275,7 +282,7 @@ public:
 
 `PublishAttempt` 只表示 accepted 或带稳定技术分类的 rejected，不包含 Paho token、异常或错误文本。Repository 错误同样使用稳定分类，不泄漏 SQL 异常。
 
-管理员、设备、历史和名单 Repository Port 也在领域层一次性声明，供后续 TASK-009、TASK-010、TASK-015 和 TASK-016 实现或调用，后续任务不得回头修改 TASK-003 所有的领域目录。分页统一返回 `PageResult<T>`；CSV 使用按固定排序逐条访问的 `HistoryVisitor` 和 `HistoryCursorResult`，回调可以在 HTTP 断流时停止读取。名单新增结果显式区分成功、已有名单类型冲突和 Repository 技术失败。
+管理员、设备、历史和名单 Repository Port 也在领域层一次性声明，供后续 TASK-009、TASK-010、TASK-015 和 TASK-016 实现或调用。分页统一返回 `PageResult<T>`。TASK-015 经确认可以扩展领域 Port：CSV 使用 `openHistoryCursor()` 在发送成功响应头前完成连接租约、只读一致性快照以及固定 64 行首批的查询和完整映射，再通过 `IHistoryCursor::next()` 按固定排序逐条读取；后续批次在同一快照内使用参数化 keyset 续读，cursor 正常读完提交，失败或未读完销毁时回滚或丢弃租约。现有 `HistoryVisitor/HistoryCursorResult` 辅助可以保留，但 HTTP CSV 不得使用它绕过 pre-header 准备。名单新增结果显式区分成功、已有名单类型冲突和 Repository 技术失败。
 
 SQL transaction 对象不得出现在领域 API。每个 Repository 方法在内部保证该方法所需的事务原子性，service 只组织跨 Port 的业务调用、状态转换和补偿顺序。接口返回领域结果或显式错误，不抛出带 SQL、密码、绝对路径的异常到控制器。基础设施异常在 service 边界映射为稳定业务错误和脱敏技术日志。
 
@@ -344,7 +351,7 @@ JSON POST 必须携带合法 JSON Content-Type。注销为空 body，可不带 C
 
 控制器通过受限 registrar 在 `run()` 前注册，运行后路由集合封闭。`HttpServer` 拥有 Crow app，不拥有 controller 或 service；调用方必须保证注册回调捕获对象在服务器停止前存活。中央 runtime 不硬编码任何业务路由。
 
-图片成功响应直接流式发送已打开文件描述符，Content-Type 来自数据库中已验证的 `image_mime`。CSV 使用分页游标按固定排序分批读取并流式转义输出，第一块先写 UTF-8 BOM 和固定十列表头，不在内存构建完整 CSV。
+图片成功响应直接流式发送已打开文件描述符，Content-Type 来自数据库中已验证的 `image_mime`，且发送响应头前核对已打开文件的 MIME 和大小。CSV 在控制器返回 `HttpResponse::csv` 前打开 pull cursor，确保租约、只读一致性快照以及首批查询和完整映射已经成功；随后按固定排序逐条读取并流式转义输出，Repository 在同一快照内以固定 64 行批次和 `(captured_at, recognition_id)` 参数化 keyset 续读，第一块先写 UTF-8 BOM 和固定十列表头，不在内存构建完整 CSV。CSV 空值、列值、CRLF 和必要引用精确遵循 `REQ-001` 第 10.5 节。
 
 Qt 注销请求的 body 长度固定允许为 0；即使请求携带 `Content-Type: application/json`，控制器也不得强制把空 body 解析为 `{}`。非空 body、`Content-Length` 与实际 body 不一致或 chunked body 含任何字节均按 `INVALID_REQUEST` 拒绝。
 
@@ -591,7 +598,7 @@ WHERE recognition_id = ? AND status = 'PROCESSING';
 
 启动恢复在单事务中锁定所有遗留 PROCESSING，revision 加一并写入 `SERVER_RESTARTED` 和“服务重启，识别任务已中断”。每行使用 `effectiveCompletedAt=max(completedAtUtc, startedAtUtc)` 写入完成时间，并以 `effectiveCompletedAt-startedAtUtc` 的 UTC 墙钟毫秒差作为 `durationMs`；这是无法跨重启延续单调时钟时的唯一例外，同时保持 `completedAt>=startedAt`。
 
-历史分页和名单分页的 `COUNT` 与 items 查询分别运行在同一个 `REPEATABLE READ` 只读一致性快照中。CSV visitor 也持有这样的只读事务和流式结果集；`recordsVisited` 计入已传给回调的当前行，回调返回 false 时 `fullyConsumed=false`，包括当前行恰为末行的情况。回调异常在 rollback 后原样传播，驱动或 mapper 异常映射为稳定 Repository failure。
+历史分页和名单分页的 `COUNT` 与 items 查询分别运行在同一个 `REPEATABLE READ` 只读一致性快照中。CSV pull cursor 在 `openHistoryCursor()` 内获取租约、启动这样的只读事务、绑定筛选并查询、完整映射固定 64 行首批；准备失败返回稳定 Repository failure，使 HTTP 层仍可返回 JSON。成功后 `next()` 从当前批逐条返回，并在批次耗尽后以最后一行 `(captured_at, recognition_id)` 为参数化 keyset 边界继续查询，SQL 始终保持 `captured_at DESC, recognition_id DESC`，不得使用 OFFSET 或依赖 Connector/C++ prepared statement 的全结果流式模式。cursor 最多保留一个固定批次；正常读到末尾提交，SQL/mapper/commit 错误返回稳定 Repository failure，未读完销毁时 rollback。连接中断或提交结果不确定时丢弃租约。现有 visitor 辅助继续保持其 `recordsVisited/fullyConsumed` 和异常 rollback 语义，并可复用 pull cursor 实现。
 
 名单新增依赖全局唯一键。1062 后在事务中锁定查询冲突记录的 `list_type`，映射为 WHITE 或 BLACK；若该行已被并发删除，则 rollback 并只重试一次插入，重试成功返回新记录，仍无法稳定解析冲突时返回 `unavailable`。
 

@@ -62,6 +62,8 @@ public:
     domain::RepositoryResult<domain::PageResult<domain::RecognitionRecord>> queryHistory(
         const domain::HistoryFilter& filter,
         const domain::PageRequest& page) override;
+    domain::RepositoryResult<std::unique_ptr<domain::IHistoryCursor>> openHistoryCursor(
+        const domain::HistoryFilter& filter) override;
     domain::RepositoryResult<domain::HistoryCursorResult> visitHistory(
         const domain::HistoryFilter& filter,
         const domain::HistoryVisitor& visitor) override;

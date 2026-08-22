@@ -520,6 +520,120 @@ TEST_F(MySqlRepositoryTest, HistoryVisitorDefinesStopLastRowAndExceptionSemantic
     EXPECT_EQ(pool.idleCount(), pool.configuredSize());
 }
 
+TEST_F(MySqlRepositoryTest, HistoryPullCursorPreparesSnapshotBeforeHeadersAndCommitsAtEof) {
+    MySqlConnectionPool pool(config_, poolOptions(2U));
+    MySqlRecognitionRepository repository(pool);
+    constexpr std::uint64_t kFirstValue = 70U;
+    constexpr std::uint64_t kRecordCount = 130U;
+    for (std::uint64_t value = kFirstValue; value < kFirstValue + kRecordCount; ++value) {
+        ASSERT_TRUE(std::holds_alternative<RecognitionRecord>(
+            repository.insertProcessing(newRecognition(value, 1000))));
+    }
+    const HistoryFilter filter(UtcTimePoint(0), UtcTimePoint(2000));
+    auto opened = repository.openHistoryCursor(filter);
+    ASSERT_TRUE(std::holds_alternative<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+        opened));
+    auto cursor = std::get<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+        std::move(opened));
+    ASSERT_TRUE(cursor);
+    EXPECT_EQ(pool.idleCount(), 1U);
+
+    ASSERT_TRUE(std::holds_alternative<RecognitionRecord>(
+        repository.insertProcessing(newRecognition(kFirstValue + kRecordCount, 500))));
+
+    std::vector<RecognitionId> ids;
+    while (true) {
+        auto next = cursor->next();
+        ASSERT_TRUE(std::holds_alternative<std::optional<RecognitionRecord>>(next));
+        auto record =
+            std::get<std::optional<RecognitionRecord>>(std::move(next));
+        if (!record) {
+            break;
+        }
+        ids.push_back(record->snapshot().recognitionId());
+        if (ids.size() == 65U) {
+            EXPECT_EQ(pool.idleCount(), 1U);
+        }
+    }
+    ASSERT_EQ(ids.size(), kRecordCount);
+    for (std::uint64_t index = 0U; index < kRecordCount; ++index) {
+        EXPECT_EQ(
+            ids[static_cast<std::size_t>(index)],
+            recognitionId(kFirstValue + kRecordCount - index - 1U));
+    }
+    EXPECT_EQ(pool.idleCount(), pool.configuredSize());
+
+    auto repeatedEof = cursor->next();
+    ASSERT_TRUE(std::holds_alternative<std::optional<RecognitionRecord>>(repeatedEof));
+    EXPECT_FALSE(std::get<std::optional<RecognitionRecord>>(repeatedEof));
+}
+
+TEST_F(MySqlRepositoryTest, HistoryPullCursorRollsBackAndMapsFirstAndLaterBatchFailures) {
+    MySqlConnectionPool pool(config_, poolOptions(1U));
+    MySqlRecognitionRepository repository(pool);
+    ASSERT_TRUE(std::holds_alternative<RecognitionRecord>(
+        repository.insertProcessing(newRecognition(80U, 1000))));
+    const HistoryFilter filter(UtcTimePoint(0), UtcTimePoint(2000));
+    {
+        auto opened = repository.openHistoryCursor(filter);
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+            opened));
+        auto cursor = std::get<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+            std::move(opened));
+        auto first = cursor->next();
+        ASSERT_TRUE(std::holds_alternative<std::optional<RecognitionRecord>>(first));
+        ASSERT_TRUE(std::get<std::optional<RecognitionRecord>>(first));
+        EXPECT_EQ(pool.idleCount(), 0U);
+    }
+    EXPECT_EQ(pool.idleCount(), pool.configuredSize());
+
+    auto raw = connect(config_);
+    execute(
+        *raw,
+        "UPDATE recognition_logs SET recognition_id = "
+        "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' WHERE recognition_id = '" +
+            recognitionId(80U).toString() + "'");
+    EXPECT_TRUE(isFailure(repository.openHistoryCursor(filter), RepositoryFailure::internal));
+    EXPECT_EQ(pool.idleCount(), pool.configuredSize());
+    execute(
+        *raw,
+        "DELETE FROM recognition_logs WHERE recognition_id = "
+        "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'");
+
+    constexpr std::uint64_t kFullBatchFirst = 300U;
+    constexpr std::uint64_t kFullBatchSize = 64U;
+    for (std::uint64_t value = kFullBatchFirst;
+         value < kFullBatchFirst + kFullBatchSize;
+         ++value) {
+        ASSERT_TRUE(std::holds_alternative<RecognitionRecord>(
+            repository.insertProcessing(newRecognition(value, 1000))));
+    }
+    ASSERT_TRUE(std::holds_alternative<RecognitionRecord>(
+        repository.insertProcessing(newRecognition(400U, 500))));
+    execute(
+        *raw,
+        "UPDATE recognition_logs SET recognition_id = "
+        "'yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy' WHERE recognition_id = '" +
+            recognitionId(400U).toString() + "'");
+
+    auto opened = repository.openHistoryCursor(filter);
+    ASSERT_TRUE(std::holds_alternative<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+        opened));
+    auto cursor = std::get<std::unique_ptr<ocrservice::domain::IHistoryCursor>>(
+        std::move(opened));
+    for (std::uint64_t index = 0U; index < kFullBatchSize; ++index) {
+        auto next = cursor->next();
+        ASSERT_TRUE(std::holds_alternative<std::optional<RecognitionRecord>>(next));
+        ASSERT_TRUE(std::get<std::optional<RecognitionRecord>>(next));
+    }
+    EXPECT_TRUE(isFailure(cursor->next(), RepositoryFailure::internal));
+    EXPECT_EQ(pool.idleCount(), pool.configuredSize());
+
+    pool.close();
+    EXPECT_TRUE(isFailure(
+        repository.openHistoryCursor(filter), RepositoryFailure::unavailable));
+}
+
 TEST_F(MySqlRepositoryTest, AccessListsUseLiteralLikeGlobalConflictAndBoundValues) {
     MySqlConnectionPool pool(config_, poolOptions());
     MySqlAccessListRepository repository(pool);

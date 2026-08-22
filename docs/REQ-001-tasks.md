@@ -31,13 +31,13 @@
 | `src/storage/` | TASK-006 |
 | `src/model/`、`models/` | TASK-007 |
 | `migrations/`、`src/repositories/mysql/connection/`、`src/repositories/mysql/migration/` | TASK-008 |
-| `src/repositories/mysql/repositories/` | TASK-009 |
+| `src/repositories/mysql/repositories/` | TASK-009；TASK-015 仅获授权扩展 Recognition 历史 pull cursor |
 | `src/security/`、`src/services/auth/` | TASK-010 |
 | `deploy/mosquitto/`、设备/Broker 初始化脚本 | TASK-011 |
 | `src/mqtt/` | TASK-012 |
 | `src/http/server/`、`src/http/middleware/` | TASK-013 |
 | `src/http/controllers/auth/`、`src/http/controllers/client/` | TASK-014 |
-| `src/http/controllers/recognition/`、History/CSV Service | TASK-015 |
+| `src/http/controllers/recognition/`、History/CSV Service、`src/domain/Ports.*` | TASK-015；`Ports.*` 仅限历史 pull cursor Port |
 | `src/http/controllers/access_list/` 和 AccessList Service | TASK-016 |
 | `src/http/controllers/device_recognition/` 和 `src/services/recognition/acceptance/` | TASK-017 |
 | `src/services/recognition/worker/` | TASK-018 |
@@ -315,15 +315,19 @@
 - **主要工作：**
   - 实现详情、历史 `[start,end)`、可选 deviceId、固定 pageSize=100 和稳定排序。
   - 实现 JPEG/PNG 文件流式下载和所有错误的 JSON 信封。
-  - 实现带 BOM、固定十列表头、正确引用/换行的 UTF-8 CSV 游标输出。
+  - 实现带 BOM、固定十列表头、空值为空字段、CRLF、RFC 4180 必要引用的 UTF-8 CSV 输出；设备列使用 `deviceId`，状态/错误码使用稳定枚举，时间精确为 `+08:00`，耗时为十进制毫秒。
+  - 扩展领域和 MySQL Repository 为 pre-header pull cursor：在返回 CSV 成功响应前完成租约、只读一致性快照以及固定 64 行首批的查询和完整映射；后续在同一快照内以 `(captured_at, recognition_id)` 参数化 keyset 分批续读，禁止 OFFSET 和全结果内存聚合，之后的查询、映射、序列化或 socket 失败必须中止连接。
   - 分页和 CSV 必须复用同一个 HistoryFilter 和 Repository 排序。
 - **预计修改文件：**
+  - `src/domain/Ports.*`
+  - `src/repositories/mysql/repositories/MySqlRepositories.*`
   - `src/services/history/**`
   - `src/services/csv/**`
   - `src/serialization/csv/**`
   - `src/http/controllers/recognition/**`
+  - `tests/component/repositories/tst_mysql_repositories.cpp`
   - `tests/integration/history_api/**`
-- **测试：** 覆盖详情 404、分页边界、时间/设备筛选、图片 MIME/缺失、CSV BOM/列/转义/断流和 Qt 10/30/120 秒时限。
+- **测试：** 覆盖详情 404、分页边界、时间/设备筛选、图片 MIME/大小/缺失、CSV BOM/列/空值/CRLF/转义、pre-header 503/500、next/mapper/serializer/socket 断流、真实 MySQL 至少跨三批的完整顺序/一致性快照/租约释放和 Qt 10/30/120 秒时限。
 - **验收标准：** 满足 AC-015 至 AC-017；分页和 CSV 记录集合/顺序一致；CSV 中途失败使客户端收到传输失败而不是完整成功。
 - **是否可以并行：** 是，可与 TASK-014、TASK-016、TASK-017 并行。
 

@@ -1,10 +1,12 @@
 #include "MySqlRepositories.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -43,10 +45,6 @@ enum class SqlContext { general, recognitionInsert };
 struct SqlFailure final {
     RepositoryFailure failure;
     bool discard;
-};
-
-struct VisitorException final {
-    std::exception_ptr cause;
 };
 
 void validateOptions(const RepositoryOptions& options) {
@@ -442,6 +440,126 @@ std::string escapeLikeKeyword(const std::string_view keyword) {
     return pattern;
 }
 
+constexpr std::size_t kHistoryCursorBatchSize = 64U;
+
+struct HistoryBatchKey final {
+    UtcTimePoint capturedAt;
+    domain::RecognitionId recognitionId;
+};
+
+struct HistoryBatch final {
+    std::vector<RecognitionRecord> records;
+    std::optional<HistoryBatchKey> lastKey;
+    bool isFinal;
+};
+
+HistoryBatch queryHistoryBatch(
+    sql::Connection& connection,
+    const domain::HistoryFilter& filter,
+    const std::optional<HistoryBatchKey>& after) {
+    const bool hasDevice = filter.deviceId().has_value();
+    const bool hasKey = after.has_value();
+    std::string suffix = "WHERE captured_at >= ? AND captured_at < ?";
+    if (hasDevice) {
+        suffix += " AND device_id = ?";
+    }
+    if (hasKey) {
+        suffix += " AND (captured_at < ? OR (captured_at = ? AND recognition_id < ?))";
+    }
+    suffix += " ORDER BY captured_at DESC, recognition_id DESC LIMIT ?";
+
+    auto statement = recognitionStatement(connection, suffix);
+    unsigned int parameter = 1U;
+    statement->setString(parameter++, formatDatabaseTime(filter.startInclusiveUtc()));
+    statement->setString(parameter++, formatDatabaseTime(filter.endExclusiveUtc()));
+    if (hasDevice) {
+        statement->setString(parameter++, filter.deviceId()->value());
+    }
+    if (hasKey) {
+        const auto capturedAt = formatDatabaseTime(after->capturedAt);
+        statement->setString(parameter++, capturedAt);
+        statement->setString(parameter++, capturedAt);
+        statement->setString(parameter++, after->recognitionId.toString());
+    }
+    statement->setUInt64(parameter, static_cast<std::uint64_t>(kHistoryCursorBatchSize));
+
+    std::unique_ptr<sql::ResultSet> result(statement->executeQuery());
+    std::vector<RecognitionRecord> records;
+    records.reserve(kHistoryCursorBatchSize);
+    while (result->next()) {
+        records.push_back(mapRecognition(*result));
+    }
+
+    std::optional<HistoryBatchKey> lastKey;
+    if (!records.empty()) {
+        const auto& snapshot = records.back().snapshot();
+        lastKey = HistoryBatchKey{snapshot.capturedAt(), snapshot.recognitionId()};
+    }
+    const bool isFinal = records.size() < kHistoryCursorBatchSize;
+    return HistoryBatch{std::move(records), std::move(lastKey), isFinal};
+}
+
+class MySqlHistoryCursor final : public domain::IHistoryCursor {
+public:
+    MySqlHistoryCursor(
+        MySqlConnectionPool::Lease lease,
+        domain::HistoryFilter filter,
+        HistoryBatch batch)
+        : lease_(std::move(lease)),
+          filter_(std::move(filter)),
+          batch_(std::move(batch)) {}
+
+    ~MySqlHistoryCursor() override {
+        if (!finished_ && lease_ && static_cast<bool>(*lease_)) {
+            rollbackNoThrow(*lease_);
+        }
+    }
+
+    RepositoryResult<std::optional<RecognitionRecord>> next() override {
+        if (finished_) {
+            return std::optional<RecognitionRecord>{};
+        }
+        bool committing = false;
+        try {
+            while (batchIndex_ >= batch_.records.size()) {
+                if (batch_.isFinal) {
+                    committing = true;
+                    lease_->connection().commit();
+                    committing = false;
+                    finish();
+                    return std::optional<RecognitionRecord>{};
+                }
+                batch_ = queryHistoryBatch(lease_->connection(), filter_, batch_.lastKey);
+                batchIndex_ = 0U;
+            }
+            return std::optional<RecognitionRecord>(
+                std::move(batch_.records[batchIndex_++]));
+        } catch (const sql::SQLException& error) {
+            return fail(handleSqlException(*lease_, error, SqlContext::general, committing));
+        } catch (...) {
+            return fail(handleUnknownException(*lease_, committing));
+        }
+    }
+
+private:
+    RepositoryResult<std::optional<RecognitionRecord>> fail(
+        const RepositoryFailure failure) noexcept {
+        finish();
+        return failure;
+    }
+
+    void finish() noexcept {
+        finished_ = true;
+        lease_.reset();
+    }
+
+    std::optional<MySqlConnectionPool::Lease> lease_;
+    domain::HistoryFilter filter_;
+    HistoryBatch batch_;
+    std::size_t batchIndex_ = 0U;
+    bool finished_ = false;
+};
+
 }  // namespace
 
 MySqlAdminUserRepository::MySqlAdminUserRepository(
@@ -814,57 +932,47 @@ RepositoryResult<domain::PageResult<RecognitionRecord>> MySqlRecognitionReposito
     }
 }
 
-RepositoryResult<HistoryCursorResult> MySqlRecognitionRepository::visitHistory(
-    const domain::HistoryFilter& filter,
-    const domain::HistoryVisitor& visitor) {
+RepositoryResult<std::unique_ptr<domain::IHistoryCursor>>
+MySqlRecognitionRepository::openHistoryCursor(const domain::HistoryFilter& filter) {
     auto lease = pool_.acquire(options_.leaseTimeout);
     if (!lease) {
         return RepositoryFailure::unavailable;
     }
-    bool committing = false;
     try {
         beginReadSnapshot(lease->connection());
-        const bool hasDevice = filter.deviceId().has_value();
-        const std::string suffix = hasDevice
-                                       ? "WHERE captured_at >= ? AND captured_at < ? AND "
-                                         "device_id = ? ORDER BY captured_at DESC, recognition_id DESC"
-                                       : "WHERE captured_at >= ? AND captured_at < ? ORDER BY "
-                                         "captured_at DESC, recognition_id DESC";
-        auto statement = recognitionStatement(lease->connection(), suffix);
-        statement->setString(1U, formatDatabaseTime(filter.startInclusiveUtc()));
-        statement->setString(2U, formatDatabaseTime(filter.endExclusiveUtc()));
-        if (hasDevice) {
-            statement->setString(3U, filter.deviceId()->value());
-        }
-        std::unique_ptr<sql::ResultSet> result(statement->executeQuery());
-        std::uint64_t visited = 0U;
-        while (result->next()) {
-            auto record = mapRecognition(*result);
-            ++visited;
-            bool keepGoing = false;
-            try {
-                keepGoing = visitor(record);
-            } catch (...) {
-                throw VisitorException{std::current_exception()};
-            }
-            if (!keepGoing) {
-                result.reset();
-                rollbackNoThrow(*lease);
-                return HistoryCursorResult(visited, false);
-            }
-        }
-        HistoryCursorResult cursorResult(visited, true);
-        committing = true;
-        lease->connection().commit();
-        committing = false;
-        return cursorResult;
-    } catch (const VisitorException& error) {
-        rollbackNoThrow(*lease);
-        std::rethrow_exception(error.cause);
+        auto firstBatch = queryHistoryBatch(lease->connection(), filter, std::nullopt);
+        std::unique_ptr<domain::IHistoryCursor> cursor = std::make_unique<MySqlHistoryCursor>(
+            std::move(*lease), filter, std::move(firstBatch));
+        return cursor;
     } catch (const sql::SQLException& error) {
-        return handleSqlException(*lease, error, SqlContext::general, committing);
+        return handleSqlException(*lease, error, SqlContext::general);
     } catch (...) {
-        return handleUnknownException(*lease, committing);
+        return internalFailure<std::unique_ptr<domain::IHistoryCursor>>(*lease);
+    }
+}
+
+RepositoryResult<HistoryCursorResult> MySqlRecognitionRepository::visitHistory(
+    const domain::HistoryFilter& filter,
+    const domain::HistoryVisitor& visitor) {
+    auto opened = openHistoryCursor(filter);
+    if (std::holds_alternative<RepositoryFailure>(opened)) {
+        return std::get<RepositoryFailure>(opened);
+    }
+    auto cursor = std::get<std::unique_ptr<domain::IHistoryCursor>>(std::move(opened));
+    std::uint64_t visited = 0U;
+    while (true) {
+        auto next = cursor->next();
+        if (std::holds_alternative<RepositoryFailure>(next)) {
+            return std::get<RepositoryFailure>(next);
+        }
+        auto record = std::get<std::optional<RecognitionRecord>>(std::move(next));
+        if (!record) {
+            return HistoryCursorResult(visited, true);
+        }
+        ++visited;
+        if (!visitor(*record)) {
+            return HistoryCursorResult(visited, false);
+        }
     }
 }
 
