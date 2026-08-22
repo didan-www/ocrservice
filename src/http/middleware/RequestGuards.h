@@ -10,7 +10,7 @@ struct request;
 
 namespace ocrservice::http::middleware {
 
-enum class RequestBodyMode { none, json, optionalEmptyJson, multipart };
+enum class RequestBodyMode { none, json, optionalJsonContentType, optionalEmptyJson, multipart };
 
 struct RequestMetadata final {
     std::optional<std::string> bearerToken;

@@ -290,6 +290,11 @@ TEST(AuthServiceTest, EnforcesCredentialUtf8LengthAndNulShapeBeforeRepository) {
     fixture.tokens.append(token('a'));
     fixture.tokens.append(token('b'));
     auto service = fixture.service();
+    EXPECT_TRUE(isFailure(
+        service->login("", "p", clientId(1U)), AuthFailure::invalidCredentials));
+    EXPECT_TRUE(isFailure(
+        service->login("admin", "", clientId(1U)), AuthFailure::invalidCredentials));
+    EXPECT_EQ(fixture.users.calls(), 0U);
     const std::string chinese = "\xE4\xB8\xAD";
     std::string username64;
     for (int index = 0; index < 64; ++index) {

@@ -137,6 +137,11 @@ TEST(RequestDecoderTest, DecodesExactLoginAndHeartbeatObjects) {
     EXPECT_EQ(login.password, "plate-demo-2026");
     EXPECT_EQ(login.clientId.toString(), "11111111-2222-4333-8444-555555555555");
 
+    const auto emptyCredentials = http::protocol::decodeLoginRequest(
+        R"({"username":"","password":"","clientId":"11111111-2222-4333-8444-555555555555"})");
+    EXPECT_TRUE(emptyCredentials.username.empty());
+    EXPECT_TRUE(emptyCredentials.password.empty());
+
     const auto heartbeat = http::protocol::decodeHeartbeatRequest(
         R"({"clientId":"11111111-2222-4333-8444-555555555555","appVersion":"0.1.0"})");
     EXPECT_EQ(heartbeat.appVersion, "0.1.0");
@@ -208,6 +213,8 @@ TEST(RequestDecoderTest, AcceptsOnlyAByteEmptyLogoutBody) {
     EXPECT_NO_THROW(http::protocol::requireEmptyRequestBody(""));
     EXPECT_THROW(http::protocol::requireEmptyRequestBody("{}"), ProtocolError);
     EXPECT_THROW(http::protocol::requireEmptyRequestBody(" "), ProtocolError);
+    EXPECT_NO_THROW(http::protocol::requireEmptyRawQuery(""));
+    EXPECT_THROW(http::protocol::requireEmptyRawQuery("key="), ProtocolError);
 }
 
 TEST(QueryDecoderTest, PreservesLiteralPlusAndDecodesPercentExactlyOnce) {

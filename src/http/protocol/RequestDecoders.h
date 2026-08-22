@@ -29,5 +29,6 @@ LoginRequest decodeLoginRequest(std::string_view body);
 HeartbeatRequest decodeHeartbeatRequest(std::string_view body);
 AccessListCreateRequest decodeAccessListCreateRequest(std::string_view body);
 void requireEmptyRequestBody(std::string_view body);
+void requireEmptyRawQuery(std::string_view rawQuery);
 
 }  // namespace ocrservice::http::protocol

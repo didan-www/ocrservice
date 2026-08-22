@@ -103,8 +103,8 @@ domain::AccessListType requireAccessListType(const Json& document) {
 LoginRequest decodeLoginRequest(const std::string_view body) {
     const auto document = parseExactObject(body, {"username", "password", "clientId"});
     return LoginRequest{
-        requireString(document, "username", false),
-        requireString(document, "password", false),
+        requireString(document, "username", true),
+        requireString(document, "password", true),
         requireUuid(document, "clientId")};
 }
 
@@ -138,6 +138,12 @@ AccessListCreateRequest decodeAccessListCreateRequest(const std::string_view bod
 void requireEmptyRequestBody(const std::string_view body) {
     if (!body.empty()) {
         throwInvalidRequest("request body must be empty");
+    }
+}
+
+void requireEmptyRawQuery(const std::string_view rawQuery) {
+    if (!rawQuery.empty()) {
+        throwInvalidRequest("query parameters are not allowed");
     }
 }
 

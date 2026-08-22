@@ -96,6 +96,13 @@ RequestMetadata validateRequest(
             }
             break;
         }
+        case RequestBodyMode::optionalJsonContentType: {
+            const auto contentType = onlyContentType(request);
+            if (contentType && !protocol::isJsonContentType(*contentType)) {
+                protocol::throwInvalidRequest("Content-Type must be application/json when present");
+            }
+            break;
+        }
         case RequestBodyMode::optionalEmptyJson: {
             const auto contentType = onlyContentType(request);
             if (!request.body.empty()) {

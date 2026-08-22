@@ -348,6 +348,8 @@ JSON POST 必须携带合法 JSON Content-Type。注销为空 body，可不带 C
 
 Qt 注销请求的 body 长度固定允许为 0；即使请求携带 `Content-Type: application/json`，控制器也不得强制把空 body 解析为 `{}`。非空 body、`Content-Length` 与实际 body 不一致或 chunked body 含任何字节均按 `INVALID_REQUEST` 拒绝。
 
+登录、注销和心跳三个 POST 路由都拒绝非空 raw query。登录不启用 Bearer parser 并忽略 `Authorization` Header；注销和心跳严格解析 Bearer。注销按 Content-Type、Bearer 格式、`authenticate()`、query/body decoder、`logout()` 执行，鉴权阶段不得撤销会话，确保非法 query/body 不会注销有效 Token。心跳按 Content-Type、Bearer 格式、`authenticate()`、query/严格 DTO decoder、`heartbeat()` 执行，使无效或到期 Token 的 401 优先于 DTO 错误。登录 decoder 只要求 `username/password` 是字符串；空值和其他凭据形状错误交给 `AuthService` 统一映射为 `AUTH_INVALID_CREDENTIALS`。
+
 ### 8.4 Qt 超时兼容预算
 
 Qt 的总时限从发出请求持续到完整响应体接收完成，服务端实现和联调测试必须遵守以下硬边界：

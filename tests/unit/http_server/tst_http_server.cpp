@@ -41,6 +41,28 @@ TEST(RequestGuardsTest, EnforcesJsonAndOptionalEmptyJsonContentTypes) {
     json.headers.emplace("Content-Type", "Application/JSON; CHARSET=UTF-8");
     EXPECT_NO_THROW(http::middleware::validateRequest(json, RequestBodyMode::json, false));
 
+    auto deferredBody = requestWith("not empty");
+    EXPECT_NO_THROW(http::middleware::validateRequest(
+        deferredBody, RequestBodyMode::optionalJsonContentType, false));
+    deferredBody.headers.emplace("Content-Type", "application/json; charset=utf-8");
+    EXPECT_NO_THROW(http::middleware::validateRequest(
+        deferredBody, RequestBodyMode::optionalJsonContentType, false));
+
+    auto deferredInvalid = requestWith();
+    deferredInvalid.headers.emplace("Content-Type", "text/plain");
+    EXPECT_THROW(
+        http::middleware::validateRequest(
+            deferredInvalid, RequestBodyMode::optionalJsonContentType, false),
+        http::protocol::ProtocolError);
+
+    auto deferredRepeated = requestWith();
+    deferredRepeated.headers.emplace("Content-Type", "application/json");
+    deferredRepeated.headers.emplace("Content-Type", "application/json");
+    EXPECT_THROW(
+        http::middleware::validateRequest(
+            deferredRepeated, RequestBodyMode::optionalJsonContentType, false),
+        http::protocol::ProtocolError);
+
     auto empty = requestWith();
     EXPECT_NO_THROW(http::middleware::validateRequest(
         empty, RequestBodyMode::optionalEmptyJson, false));
