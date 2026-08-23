@@ -69,14 +69,7 @@ target_link_libraries(
 
 ocr_discover_subdirectories("${CMAKE_CURRENT_SOURCE_DIR}/src" "modules")
 
-set(_ocrservice_generated_main "${_ocrservice_generated_dir}/ocrservice_main.cpp")
-file(
-    GENERATE
-    OUTPUT "${_ocrservice_generated_main}"
-    CONTENT "int main() { return 0; }\n"
-)
-
-add_executable(ocrservice "${_ocrservice_generated_main}")
+add_executable(ocrservice src/main.cpp)
 target_link_libraries(ocrservice PRIVATE ocrservice::core)
 
 if(OCRSERVICE_BUILD_TESTING)

@@ -612,3 +612,115 @@ ocr_patch_crow(
     "        bool shutting_down_ = false;"
     "        std::atomic<bool> shutting_down_{false};"
 )
+
+ocr_patch_crow(
+    "include/crow/app.h"
+    [=[#include <chrono>
+#include <string>]=]
+    [=[#include <chrono>
+#include <exception>
+#include <string>]=]
+)
+
+ocr_patch_crow(
+    "include/crow/http_server.h"
+    [=[#include <cstdint>
+#include <future>]=]
+    [=[#include <cstdint>
+#include <exception>
+#include <future>]=]
+)
+
+ocr_patch_crow(
+    "include/crow/http_server.h"
+    [=[        void wait_for_start()
+        {
+            std::unique_lock<std::mutex> lock(start_mutex_);
+            if (!server_started_)
+                cv_started_.wait(lock);
+        }]=]
+    [=[        void wait_for_start()
+        {
+            std::unique_lock<std::mutex> lock(start_mutex_);
+            cv_started_.wait(lock, [this] { return server_started_ || server_start_exception_; });
+            if (server_start_exception_)
+                std::rethrow_exception(server_start_exception_);
+        }
+
+        void notify_start_exception(std::exception_ptr error)
+        {
+            std::unique_lock<std::mutex> lock(start_mutex_);
+            if (!server_started_)
+                server_start_exception_ = std::move(error);
+            cv_started_.notify_all();
+        }]=]
+    "void notify_start_exception(std::exception_ptr error)"
+)
+
+ocr_patch_crow(
+    "include/crow/http_server.h"
+    [=[        bool server_started_{false};
+        std::condition_variable cv_started_;]=]
+    [=[        bool server_started_{false};
+        std::exception_ptr server_start_exception_;
+        std::condition_variable cv_started_;]=]
+)
+
+ocr_patch_crow(
+    "include/crow/app.h"
+    [=[        void wait_for_server_start()
+        {
+            {
+                std::unique_lock<std::mutex> lock(start_mutex_);
+                if (!server_started_)
+                    cv_started_.wait(lock);
+            }
+            if (server_)
+                server_->wait_for_start();
+#ifdef CROW_ENABLE_SSL
+            else if (ssl_server_)
+                ssl_server_->wait_for_start();
+#endif
+        }]=]
+    [=[        void wait_for_server_start()
+        {
+            {
+                std::unique_lock<std::mutex> lock(start_mutex_);
+                cv_started_.wait(lock, [this] { return server_started_ || server_start_exception_; });
+                if (server_start_exception_)
+                    std::rethrow_exception(server_start_exception_);
+            }
+            if (server_)
+                server_->wait_for_start();
+#ifdef CROW_ENABLE_SSL
+            else if (ssl_server_)
+                ssl_server_->wait_for_start();
+#endif
+        }
+
+        void notify_server_start_exception(std::exception_ptr error)
+        {
+            {
+                std::unique_lock<std::mutex> lock(start_mutex_);
+                if (!server_started_)
+                    server_start_exception_ = error;
+                cv_started_.notify_all();
+            }
+            if (server_)
+                server_->notify_start_exception(std::move(error));
+#ifdef CROW_ENABLE_SSL
+            else if (ssl_server_)
+                ssl_server_->notify_start_exception(std::move(error));
+#endif
+        }]=]
+    "void notify_server_start_exception(std::exception_ptr error)"
+)
+
+ocr_patch_crow(
+    "include/crow/app.h"
+    [=[        bool server_started_{false};
+        std::condition_variable cv_started_;]=]
+    [=[        bool server_started_{false};
+        std::exception_ptr server_start_exception_;
+        std::condition_variable cv_started_;]=]
+)

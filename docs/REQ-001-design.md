@@ -166,7 +166,8 @@ domain -> C++ standard library + text(utf8proc) only
 Application
 ├── Config (immutable)
 ├── Logger
-├── ModelRuntime (YOLO Session + LPRNet Session)
+├── RecognitionWorkerRuntimes[]
+│   └── OnnxPlateRecognizer (private YOLO Session + private LPRNet Session)
 ├── MySqlConnectionPool
 ├── Repositories
 ├── ImageStorage
@@ -191,7 +192,7 @@ Crow 并发数保持小而固定以适配教学负载。MySQL 使用固定 6 个
 
 HTTP 运行时显式绑定 `0.0.0.0`，监听端口来自配置中的 `HTTP_PORT`（教学默认 `8080`），使用固定 4 个 worker 和 5 秒请求读取空闲超时，不使用按宿主机核数变化的 `multithreaded()`。`HttpServer::run()` 阻塞当前线程，`stop()` 幂等；线程创建、信号处理和组合顺序由 TASK-019 负责。
 
-`ModelRuntime` 在启动后只读。默认只有一个识别 worker，因此两个 ONNX Session 不需要外部并发锁；若把 `RECOGNITION_WORKERS` 调大，每个 worker 独立持有两个 Session，避免共享可变输入缓冲区。
+每个 `RecognitionWorkerRuntime` 独立持有一个 `OnnxPlateRecognizer`、一个 `OpenCvStoredImageDecoder` 和一个 `SystemWorkerClock`。每个 recognizer 独立持有一对 YOLO/LPRNet Session；默认只有一个识别 worker，因此默认共两个 Session。`RECOGNITION_WORKERS` 调大时不得共享 Session、解码缓冲区、可变模型输入或时钟对象。
 
 ## 7. 核心领域类型与端口
 
@@ -523,7 +524,7 @@ worker 对每个任务：
 
 ### 13.2 启动校验
 
-启动创建两个 Session，并严格校验：
+启动按配置的 worker 数量创建 recognizer；每个 recognizer 创建一对 YOLO/LPRNet Session，并对每一对严格校验：
 
 - 文件可读且 SHA-256 与构建清单一致。
 - 输入输出数量各为 1。
@@ -564,7 +565,7 @@ worker 对每个任务：
 
 ### 14.1 migration
 
-应用在 HTTP 启动前执行 `migrations/NNN_name.sql`。增加技术表：
+生产应用在 HTTP 启动前从固定 `/app/migrations` 执行 `NNN_name.sql`；测试组合构造可以注入临时 migration 目录，但不增加生产环境变量或 CLI。增加技术表：
 
 ```sql
 CREATE TABLE schema_migrations (
@@ -656,7 +657,7 @@ Broker URI 只由 `MQTT_HOST/MQTT_PORT` 构造成 `tcp://host:port`。hostname/I
 
 日志适配器保证 Paho 回调和失败路径不抛异常。只记录稳定事件/分类以及可选 recognitionId/deviceId；后台连接事件使用固定非敏感 `requestId=system`，不记录密码、完整 Broker URI、完整 Payload 或 Paho 原始异常文本。
 
-启动恢复是唯一特例：本次启动从 PROCESSING 改成 `FAILED/SERVER_RESTARTED` 的记录保存在内存列表；MQTT 首次连通时每条尽力发布一次，调用返回后从列表删除，不论成功失败都不再重试。
+启动恢复是唯一特例：本次启动从 PROCESSING 改成 `FAILED/SERVER_RESTARTED` 的记录保存在内存列表；Repository 返回任何非 value 结果都使启动失败。MQTT 首次连通时，每条严格先调用一次 `publishManagement`，再调用一次映射为 `KEEP_CLOSED` 的 `publishDeviceFinal`。两个调用分别捕获 rejected 和异常，管理发布失败仍尝试设备发布；每个主题每条最多一次。两个调用完成后无论结果都删除该记录，后续重连不再重试。恢复记录不进入识别队列，也不调用模型。
 
 ## 16. 配置设计
 
@@ -669,6 +670,8 @@ compiled teaching defaults
 ```
 
 开发环境可把同结构文件挂载到 `/app/config/server.json`。未知 JSON 配置键、错误类型、非法范围和必需敏感变量缺失均启动失败。日志只输出非敏感的最终配置摘要。
+
+生产 `main` 不接受命令行参数，配置路径固定为 `/app/config/server.json`，migration 路径固定为 `/app/migrations`。应用组合根只为测试提供构造参数以注入替代路径；该测试 seam 不映射为公开环境变量或 CLI。
 
 除 `REQ-001` 已列项外，连接所必需的配置为：
 
@@ -742,39 +745,45 @@ Mosquitto 2.0.11 内置 ACL 不提供独立的 subscribe ACL 类型。管理端�
 ### 17.1 启动
 
 ```text
-load and validate config
- -> initialize logger
+block SIGINT/SIGTERM in the main thread
+ -> load and validate /app/config/server.json
+ -> initialize bootstrap console logger for sanitized pre-file startup failures only
  -> validate/create image and log roots
- -> hash, load and validate both ONNX models
+ -> initialize rotating file logger and use it for all subsequent stages
+ -> construct one private recognizer/decoder/clock set per recognition worker
+ -> hash, load and validate one YOLO/LPRNet Session pair per worker
  -> establish all six MySQL pool connections with one shared 60-second retry budget
  -> use a dedicated connection and an independent 60-second migration-lock budget
- -> migrate and verify the configured pre-created schema
- -> transactionally fail stale PROCESSING rows
- -> create repositories/services/queue
+ -> migrate /app/migrations and verify the configured pre-created schema
+ -> create the recognition repository and transactionally fail stale PROCESSING rows
+ -> create remaining repositories/services/queue
  -> start recognition workers
- -> start HTTP server
+ -> start HTTP server and wait for ready-or-exception
  -> start MQTT background connection
 ```
 
-MySQL 在共享连接预算 60 秒内不能建立全部 6 个 UTC 连接、migration lock 在其独立 60 秒预算内不可获得、migration 失败或模型不匹配时进程以非零状态退出。MQTT 不可用时继续启动，`/health` 为 DEGRADED。
+MySQL 在共享连接预算 60 秒内不能建立全部 6 个 UTC 连接、migration lock 在其独立 60 秒预算内不可获得、migration 失败、启动恢复 Repository 返回非 value、模型不匹配或 HTTP 监听失败时，进程均以非零状态退出。MQTT 不可用时继续启动，`/health` 为 DEGRADED。
 
 HTTP 对外监听前，模型和 MySQL 必须已就绪，避免短暂接受无法处理的请求。
 
+bootstrap console logger 只记录 rotating file logger 创建前的脱敏启动错误。图片和日志根目录创建并验证后，组合根创建 rotating file logger，后续组件共享且只使用该最终 logger。HTTP 启动等待必须由同一状态同步表示“真实监听 ready”或“启动 exception”，并把原始异常传回组合根。禁止固定 sleep、与监听状态无关的盲目超时，以及先预绑定再释放端口的检查竞态。任一启动阶段失败时，组合根只对已经完成的启动阶段按其逆序执行幂等回滚，join 所有已创建线程、关闭已建立连接，并在最后 flush 当时已创建的每个 logger。
+
 ### 17.2 健康检查
 
-`HealthService` 读取：模型启动状态、MySQL 轻量探测、MQTT 原子连接状态、queue depth/capacity。它通过专用精确 DTO 生成 `REQ-001` 规定字段。模型或 MySQL DOWN 返回 503 失败信封；仅 MQTT DOWN 返回 200 的 DEGRADED 数据对象。
+`HealthService` 读取：模型启动状态、MySQL 轻量探测、MQTT 原子连接状态、queue depth/capacity。MySQL 探测基于 pool 保存的不可变配置创建一次性 health-only connection，不占用、不改变也不补充六条业务连接；该连接固定 `OPT_CONNECT_TIMEOUT=1` 和 `OPT_READ_TIMEOUT=1`，配置 UTC/session 后固定执行一次真实 `SELECT 1`，不重试且永不进入业务池。连接/握手、session 配置和查询均受上述超时约束，完整探针最多 3 秒。连接、SQL、结果 shape 或值、网络读超时或其他异常均为 DOWN，一次性连接随后关闭。模型和 MySQL UP 时通过既有专用精确 DTO 生成 `REQ-001` 六字段，MQTT UP 返回 200 UP，MQTT DOWN 返回 200 DEGRADED。模型或 MySQL DOWN 返回 503 `SERVICE_UNAVAILABLE` 失败信封且 `data=null`，不得构造包含 DOWN 的成功 DTO。
 
 Docker healthcheck 调用 `/health`，Compose `depends_on` 只辅助启动顺序，应用仍执行自身重试。
 
 ### 17.3 停止
 
-SIGTERM/SIGINT 只在信号安全处理器中设置停止标志并唤醒主线程。主线程依次：
+主线程必须在创建任何 worker、HTTP 或 MQTT 线程前通过 `pthread_sigmask` 阻塞 SIGTERM/SIGINT，使后续线程继承阻塞掩码；随后由主线程使用 POSIX `sigwait` 同步等待，不安装承担停止编排的异步信号处理器。收到信号后主线程依次：
 
 1. 调用 Acceptance service 的 `stopAcceptingAndWait()`：先让新上传返回 503 并停止新队列预留，再等待所有 in-flight 受理完成 commit 或补偿。
-2. 停止 HTTP 接受新连接；只有 in-flight acceptance 归零后才能调用 queue `requestStop()`。
-3. 请求 worker 在当前阶段结束后停止，并丢弃尚未开始任务的内存执行机会；数据库记录保持 PROCESSING。
-4. 断开 MQTT。
-5. 关闭连接池并 flush 日志。
+2. 调用 HTTP `stop()` 并 join HTTP 线程；只有 in-flight acceptance 归零且 HTTP 线程回收后才能调用 queue `requestStop()`。
+3. 调用 queue `requestStop()`，再 join 全部 worker；已取出的任务完成，未取出的任务丢弃内存执行机会且数据库记录保持 PROCESSING。
+4. 调用 MQTT `stop()` 并回收后台控制线程。
+5. 关闭 MySQL 连接池。
+6. 最后 flush 最终 rotating file logger；启动回滚则在最后 flush 当时已经创建的每个 logger，包括可能仅存在的 bootstrap console logger。
 
 ONNX Runtime 单次 `Run` 不假设可中断。Compose 设置有限 `stop_grace_period`；超时后容器可强制结束。下次启动把所有遗留 PROCESSING 标记为 `FAILED/SERVER_RESTARTED`，不重新推理。
 

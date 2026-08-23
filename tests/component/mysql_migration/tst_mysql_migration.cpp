@@ -511,6 +511,38 @@ TEST_F(MySqlComponentTest, DefaultPoolProvidesSixUtcConnections) {
     EXPECT_FALSE(pool.acquire(20ms).has_value());
 }
 
+TEST_F(MySqlComponentTest, HealthProbeUsesIndependentConnectionWhenBusinessPoolIsExhausted) {
+    MySqlConnectionPool pool(config_, oneConnection());
+    EXPECT_TRUE(pool.ping());
+
+    auto held = pool.acquire(1s);
+    ASSERT_TRUE(held.has_value());
+    EXPECT_EQ(pool.idleCount(), 0U);
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_TRUE(pool.ping());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_LT(elapsed, 1s);
+    EXPECT_EQ(pool.idleCount(), 0U);
+}
+
+TEST_F(MySqlComponentTest, HealthProbeNeverInspectsOrReplacesBusinessPoolConnections) {
+    MySqlConnectionPool pool(config_, oneConnection());
+    std::string connectionId;
+    {
+        auto lease = pool.acquire(1s);
+        ASSERT_TRUE(lease.has_value());
+        connectionId = scalar(lease->connection(), "SELECT CONNECTION_ID()");
+    }
+    auto killer = connect(config_);
+    execute(*killer, "KILL CONNECTION " + connectionId);
+
+    EXPECT_TRUE(pool.ping());
+    EXPECT_EQ(pool.idleCount(), 1U);
+
+    pool.close();
+    EXPECT_FALSE(pool.ping());
+}
+
 TEST_F(MySqlComponentTest, ReturningLeaseRollsBackAndResetsSession) {
     migrate();
     MySqlConnectionPool pool(config_, oneConnection());

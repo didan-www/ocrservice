@@ -1,0 +1,35 @@
+ocr_add_module(
+    NAME app_runtime
+    SOURCES
+        ApplicationRuntime.cpp
+        ProductionApplication.cpp
+        RecoveryPublisher.cpp
+    PUBLIC_DEPENDENCIES
+        app_config
+        domain
+    PRIVATE_DEPENDENCIES
+        access_list_controller
+        access_list_service
+        auth_controller
+        auth_service
+        client_controller
+        csv_service
+        device_recognition_controller
+        health_controller
+        health_service
+        history_service
+        http_middleware
+        http_server
+        image_storage
+        logging
+        mqtt_publisher
+        mysql_connection
+        mysql_migration
+        mysql_repositories
+        plate_model
+        recognition_acceptance
+        recognition_controller
+        recognition_queue
+        recognition_worker
+        security
+)

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -301,7 +302,12 @@ public:
             std::lock_guard<std::mutex> lock(routesMutex_);
             sealed_ = true;
         }
-        app_.run();
+        try {
+            app_.run();
+        } catch (...) {
+            app_.notify_server_start_exception(std::current_exception());
+            throw;
+        }
     }
 
     void stop() noexcept {

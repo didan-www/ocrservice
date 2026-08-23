@@ -65,6 +65,7 @@ public:
     MySqlConnectionPool& operator=(const MySqlConnectionPool&) = delete;
 
     std::optional<Lease> acquire(std::chrono::milliseconds timeout);
+    bool ping() noexcept;
     void close() noexcept;
 
     const std::string& database() const noexcept;

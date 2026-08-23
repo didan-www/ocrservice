@@ -11,13 +11,17 @@
 
 #include <cppconn/connection.h>
 #include <cppconn/exception.h>
+#include <cppconn/resultset.h>
+#include <cppconn/resultset_metadata.h>
 #include <cppconn/statement.h>
 #include <mysql_driver.h>
 
 namespace ocrservice::repositories::mysql::connection {
 namespace {
 
-std::unique_ptr<sql::Connection> connectOnce(const app::config::MySqlConfig& config) {
+std::unique_ptr<sql::Connection> connectOnce(
+    const app::config::MySqlConfig& config,
+    const bool healthProbe = false) {
     sql::ConnectOptionsMap properties;
     properties["hostName"] = config.host;
     properties["port"] = static_cast<int>(config.port);
@@ -25,6 +29,9 @@ std::unique_ptr<sql::Connection> connectOnce(const app::config::MySqlConfig& con
     properties["password"] = config.password;
     properties["schema"] = config.database;
     properties["OPT_CONNECT_TIMEOUT"] = 1;
+    if (healthProbe) {
+        properties[OPT_READ_TIMEOUT] = 1;
+    }
     auto* const driver = sql::mysql::get_mysql_driver_instance();
     return std::unique_ptr<sql::Connection>(driver->connect(properties));
 }
@@ -232,6 +239,29 @@ std::optional<MySqlConnectionPool::Lease> MySqlConnectionPool::acquire(
         if (state->available.wait_until(lock, deadline) == std::cv_status::timeout) {
             return std::nullopt;
         }
+    }
+}
+
+bool MySqlConnectionPool::ping() noexcept {
+    try {
+        const auto state = state_;
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->closed) {
+                return false;
+            }
+        }
+        auto connection = connectOnce(state->config, true);
+        configureSession(*connection, state->config.database);
+        connection->setAutoCommit(true);
+        std::unique_ptr<sql::Statement> statement(connection->createStatement());
+        statement->setQueryTimeout(1U);
+        std::unique_ptr<sql::ResultSet> result(statement->executeQuery("SELECT 1"));
+        auto* const metadata = result->getMetaData();
+        return metadata != nullptr && metadata->getColumnCount() == 1U && result->next() &&
+               !result->isNull(1U) && result->getInt(1U) == 1 && !result->next();
+    } catch (...) {
+        return false;
     }
 }
 

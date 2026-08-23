@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -758,6 +759,18 @@ TEST(HttpRegistrarTest, RejectsAmbiguousAndRepeatedParameterTemplates) {
             HttpMethod::get, "/overlap/fixed/{tail}", {},
             [](const HttpRequest& req) { return success(req); }),
         std::invalid_argument);
+}
+
+TEST(HttpServerLifecycleTest, OccupiedPortPropagatesStartupExceptionWithoutHanging) {
+    asio::io_context context;
+    asio::ip::tcp::acceptor occupied(
+        context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0U));
+    http::server::HttpServer server(
+        occupied.local_endpoint().port(), std::make_shared<SequentialRequestIds>());
+    auto running = std::async(std::launch::async, [&server] { server.run(); });
+
+    EXPECT_THROW(server.waitUntilStarted(), std::exception);
+    EXPECT_THROW(running.get(), std::exception);
 }
 
 }  // namespace

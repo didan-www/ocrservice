@@ -41,7 +41,7 @@
 | `src/http/controllers/access_list/` 和 AccessList Service | TASK-016 |
 | `src/http/controllers/device_recognition/`、`src/services/recognition/acceptance/`、`tests/integration/device_upload_api/` | TASK-017；另获最小授权修改 `src/domain/Ports.h` 的 `StorageFailure::alreadyExists`、`src/queue/RecognitionTaskQueue.*`、`tests/unit/queue/**`、`src/storage/PosixFileOps.*`、`src/storage/PosixImageStorage.*`、`tests/component/storage/**`，以及为统一 HTTP Token 逗号规则所需的 TASK-011 `scripts/provision-device.sh`、`tests/component/mosquitto_scripts/tst_mosquitto_scripts.sh` |
 | `src/services/recognition/worker/` | TASK-018 |
-| `src/app/runtime/`、`src/main.cpp`、Health 控制器和 Service | TASK-019 |
+| `src/app/runtime/`、`src/services/health/`、`src/http/controllers/health/`、`src/main.cpp`、`tests/integration/application_lifecycle/` | TASK-019；另获最小授权修改根 `CMakeLists.txt`，`cmake/PatchCrow121.cmake`、`src/http/server/HttpServer.h`、`src/http/server/HttpServer.cpp`、`tests/unit/http_server/**`、`tests/component/http_runtime/**`，以及 `src/repositories/mysql/connection/MySqlConnectionPool.h`、`src/repositories/mysql/connection/MySqlConnectionPool.cpp`、`tests/component/mysql_migration/**`；例外仅用于 production main 接线、HTTP ready-or-exception 和使用一次性 health-only connection、连接/网络读各 1 秒、总计最多 3 秒的真实 health probe，不得改变六条业务连接行为 |
 | Dockerfile、Compose、容器入口和 `.env.example` | TASK-020 |
 | Qt 契约夹具和契约测试 | TASK-021 |
 | 嵌入式模拟器和其系统测试 | TASK-022 |
@@ -401,19 +401,23 @@
 - **目标：** 将所有模块装配为单进程服务并实现确定的生命周期。
 - **前置依赖：** TASK-002 至 TASK-018 全部完成。
 - **主要工作：**
-  - 按设计顺序加载配置、日志、目录、模型、MySQL、迁移、恢复、Repository、Service、队列、HTTP 和 MQTT。
-  - HTTP 监听前保证模型/MySQL 可用；MQTT 不可用时以 DEGRADED 启动。
-  - 启动事务将遗留 PROCESSING 改为 FAILED/SERVER_RESTARTED，首次 MQTT 连接时每条尽力发布一次。
-  - 实现 `/health` 精确 DTO 和 MySQL/模型/MQTT/队列状态。
-  - 实现信号安全停止；先调用 TASK-017 `stopAcceptingAndWait()` 等待 in-flight 受理归零，再 requestStop 队列/worker、断开 MQTT、关闭 MySQL 和 flush 日志。
+  - production main 固定零参数，从 `/app/config/server.json` 加载配置、从 `/app/migrations` 执行迁移；仅测试构造可注入路径，不增加公开 env/CLI。
+  - 按设计顺序加载配置、bootstrap console logger、目录、最终 rotating file logger、每 worker 私有 recognizer/decoder/clock、MySQL、迁移、Recognition Repository、恢复、其余 Repository、Service、队列、HTTP 和 MQTT；bootstrap logger 只用于最终 logger 建立前的脱敏启动错误，后续统一使用最终 logger，每个已创建 logger 都在停止或回滚最后 flush；每 worker 独立持有一对 YOLO/LPRNet Session。
+  - HTTP 监听前保证模型/MySQL 可用；HTTP 等待必须 ready 或 exception 二选一，禁止 sleep、盲目超时和预绑定竞态；MQTT 不可用时以 DEGRADED 启动。
+  - 启动事务将遗留 PROCESSING 改为 FAILED/SERVER_RESTARTED；Repository 非 value 为致命启动失败。首次 MQTT 连接时每条严格先管理 final 后设备 final，各主题最多一次、独立处理失败，删除后不因重连重试，且不入队、不推理。
+  - 实现 `/health`：MySQL 使用 pool 不可变配置创建不进入业务池的一次性 health-only connection，连接与网络读超时各 1 秒，UTC/session 配置后固定执行一次 `SELECT 1`，完整探针总计最多 3 秒且无重试；不得占用或改变六条业务连接。同时读取模型/MQTT/队列状态。200 使用既有精确六字段 UP/DEGRADED DTO，模型或 MySQL DOWN 返回 503 `SERVICE_UNAVAILABLE` 且 `data=null`。
+  - 在创建任何线程前阻塞 SIGINT/SIGTERM，由主线程 POSIX `sigwait` 同步停止；严格执行 acceptance stop/wait、HTTP stop/join、queue requestStop、worker join、MQTT stop、pool close、logger flush。启动失败按已完成阶段逆序幂等回滚。
 - **预计修改文件：**
   - `src/app/runtime/**`
   - `src/services/health/**`
   - `src/http/controllers/health/**`
   - `src/main.cpp`
   - `tests/integration/application_lifecycle/**`
-- **测试：** 使用 fake 组件覆盖完整启动顺序、MySQL 超时、模型不匹配、MQTT 降级、健康 DTO、SIGTERM 和 PROCESSING 恢复。
-- **验收标准：** 满足 AC-019；启动/停止无悬挂线程；MySQL/模型失败非零退出；仅 MQTT 失败仍提供 HTTP；恢复不重新推理。
+  - 根 `CMakeLists.txt`（仅把占位 main 切换为 production `src/main.cpp`）
+  - `cmake/PatchCrow121.cmake`、`src/http/server/HttpServer.h`、`src/http/server/HttpServer.cpp`、`tests/unit/http_server/**`、`tests/component/http_runtime/**`（仅 ready-or-exception）
+  - `src/repositories/mysql/connection/MySqlConnectionPool.h`、`src/repositories/mysql/connection/MySqlConnectionPool.cpp`、`tests/component/mysql_migration/**`（仅使用一次性 health-only connection、connect/read 各 1 秒、总计最多 3 秒且不改变业务 pool 的真实 health probe）
+- **测试：** 使用 production-neutral fake seam 覆盖精确启动顺序、bootstrap/final logger 切换和各失败阶段最后 flush、每阶段失败的逆序回滚、MySQL 超时、模型不匹配、多 worker 私有依赖、占用端口 ready-or-exception、MQTT 降级、健康六字段/503 null、SIGINT/SIGTERM、严格停止顺序和 PROCESSING 恢复；真实 MySQL 组件测试覆盖 `SELECT 1` 成功、业务 pool 全部租出时 health probe 仍独立成功且业务连接数量不变、health-only connection 无重试；真实故障注入暂停 MySQL，验证网络读超时、完整探针 3 秒边界、503 `data=null`，恢复 MySQL 后下一探针恢复 UP。
+- **验收标准：** 满足 AC-019；启动/停止无悬挂线程；HTTP 启动异常可观测且非零退出；MySQL/模型/恢复失败非零退出；仅 MQTT 失败仍提供 HTTP；恢复记录两个主题各最多尝试一次且绝不重新推理；正常停止与启动回滚顺序精确。
 - **是否可以并行：** 否。它是模块组合任务，必须在 TASK-002 至 TASK-018 后串行执行。
 
 ### TASK-020 实现 Docker 镜像和 Compose 教学部署
