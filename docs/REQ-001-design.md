@@ -484,7 +484,7 @@ authenticate and validate request
 
 - `tryReserve()`：非阻塞获取 RAII 槽位。
 - `commit(task)`：无分配、无异常地把正常有效预留转换为可见任务。
-- `take(stopToken)`：worker 等待任务或停止。
+- `take()`：worker 等待 start gate 打开的最早任务或停止；返回空值时永久结束该 worker 循环。
 - `stopAccepting()`：拒绝新预留。
 - `requestStop()`：唤醒等待线程。
 
@@ -492,16 +492,19 @@ authenticate and validate request
 
 worker 对每个任务：
 
-1. 等待 start gate。
-2. 读取数据库中的 PROCESSING 记录和图片路径。
-3. 从磁盘解码原图。
-4. 调用 `IPlateRecognizer`。
-5. 使用单调时钟计算 `durationMs`，墙上时钟生成 `completedAt`。
-6. 事务执行条件更新：只允许当前 `PROCESSING` 变成最终状态，revision 加一。
-7. 提交后构造完整最终快照。
-8. 依次尽力发布管理最终事件和本设备最终结果。
+1. `take()` 返回后立即采样单调起点；TASK-019 创建和 join 线程，worker 自身只提供阻塞循环。
+2. 按 ID 查询记录；缺失或已是最终状态视为陈旧/重复任务并丢弃。查询技术失败或异常时也停止本任务，保持数据库原状态。
+3. 通过 `IImageStorage` 打开图片，核对数据库与文件句柄的 MIME/大小，按声明大小循环读取并额外探测尾随字节，再核对 JPEG/PNG 签名和解码结果。
+4. 由 worker 私有 `IStoredImageDecoder` 产生拥有自身连续 BGR8 字节的 `DecodedBgrImage`，其 `BgrImageView` 生命周期覆盖完整模型调用；生产实现使用 OpenCV `imdecode(IMREAD_COLOR)`，并再次限制宽高不超过 8192、总像素不超过 4000 万。
+5. 调用 `IPlateRecognizer`。图片流水线失败、模型异常或无法产生合法结果统一得到 `FAILED/MODEL_INFERENCE_ERROR`；模型显式返回的三类失败保持原值。
+6. 产生 `RecognitionOutcome` 后结束单调计时：负差取 0，过大值饱和到 `2^53-1`；此区间包含查询、读取、校验、解码和模型，不包含 finalize/MQTT。
+7. 墙上时钟生成 `completedAt=max(nowUtc, record.startedAt)`；不得用墙上时钟差计算正常任务耗时。
+8. 恰好一次调用 Repository `finalize`，由其事务条件更新 `PROCESSING`、递增 revision 并回读已提交最终记录。
+9. 只有 `finalize` 返回已提交记录时，严格先尝试管理最终事件、再尝试本设备最终结果；设备动作只由 `gateActionFor(final status)` 生成。
 
-单任务异常被捕获并转换为 `FAILED/MODEL_INFERENCE_ERROR` 或明确的内部失败映射，不能终止 worker。最终数据库更新失败时记录错误，不发布与数据库不一致的最终消息；该记录留为 PROCESSING，由重启恢复机制处理。
+`finalize` 返回 notFound、stateConflict、其他技术失败或抛出异常时，不回读猜测、不重试、不发布；记录缺失或并发重复任务中未赢得条件更新的一方因此不会重复发布。管理与设备发布分别捕获 rejected `PublishAttempt` 和异常，前者失败仍必须尝试后者；发布失败不回滚、不改 revision、不执行应用级重试。
+
+`run() noexcept` 在任务边界兜住所有异常并继续下一任务。日志固定 `requestId=system`，只记录稳定 event/code 及可选 recognitionId/deviceId/durationMs，不记录路径、图片、Payload、secret 或异常原文。`requestStop()` 后，已经由 `take()` 返回的任务完成；队列内尚未取出的任务被丢弃，随后 `take()` 返回空值并结束循环。
 
 ## 13. 模型适配设计
 

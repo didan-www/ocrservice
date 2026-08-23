@@ -382,14 +382,17 @@
 - **目标：** 消费队列任务，完成模型识别、最终状态事务和两类最终事件发布。
 - **前置依赖：** TASK-007、TASK-009、TASK-012、TASK-017。
 - **主要工作：**
-  - worker 按 recognitionId 读取记录/图片并调用模型接口。
+  - worker 以阻塞 `run() noexcept` 循环消费队列；已取出任务完成，停止时未取出任务由队列丢弃，线程创建和 join 留给 TASK-019。
+  - 按 recognitionId 读取 PROCESSING 记录，严格核对并完整读取图片元数据/字节/签名，使用 worker 私有可注入解码器产生自持有 BGR 缓冲后调用模型接口。
+  - 单调耗时覆盖查询、读图、校验、解码和模型，负差归零并饱和到 `2^53-1`；`completedAt=max(nowUtc, startedAt)`。
   - 在单事务中从 PROCESSING 条件更新为 SUCCEEDED 或 FAILED，revision 递增并回读最终快照。
-  - 提交事务后先发布管理完整快照，再发布设备最终结果和 GateAction。
-  - Broker 拒绝发布时只记录失败，不回滚、不改 revision、不重试业务消息。
+  - 每个有效任务只调用一次 finalize；仅返回已提交最终记录时先发布管理完整快照，再按最终状态映射发布设备结果和 GateAction。
+  - 记录缺失/已完成、查询失败、条件更新失败或异常不推理或不发布；不回读猜测、不重试。
+  - 两次 MQTT 发布分别捕获拒绝和异常，管理发布失败仍尝试设备发布；只记录脱敏稳定分类，不回滚、不改 revision、不重试业务消息。
 - **预计修改文件：**
   - `src/services/recognition/worker/**`
   - `tests/integration/recognition_worker/**`
-- **测试：** mock 模型/Repository/MQTT 覆盖成功、无车牌、模型异常、条件更新失败、Broker 离线、重复 worker 和发布顺序。
+- **测试：** mock 模型/Repository/Storage/解码器/MQTT/时钟覆盖成功、三类显式模型失败、模型异常、图片缺失/短读/元数据或签名不符/损坏解码、墙钟回拨、耗时饱和、查询与 finalize 的各类失败及异常、提交前不发布、严格发布顺序和相互独立失败、串行及并发重复任务、停止边界、单任务异常后继续、自持有 BGR 生命周期和日志脱敏。
 - **验收标准：** 满足 AC-010 至 AC-012、AC-020；数据库是最终事实；MQTT Payload 可独立恢复完整状态；失败场景设备动作为 KEEP_CLOSED。
 - **是否可以并行：** 是，TASK-017 完成后可与尚未完成的 TASK-014、TASK-015、TASK-016 并行。
 
