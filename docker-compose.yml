@@ -1,0 +1,94 @@
+name: ocrservice
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ocrservice
+      MYSQL_USER: ocrservice
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_as_cs
+      - --default-time-zone=+00:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    networks: [ocrservice]
+
+  mqtt:
+    build:
+      context: .
+      target: mqtt
+      platforms: [linux/amd64]
+    image: ${MQTT_IMAGE:-ocrservice-mosquitto:teaching}
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      MQTT_SERVER_USERNAME: plate-server
+      MQTT_SERVER_PASSWORD: ${MQTT_SERVER_PASSWORD:?MQTT_SERVER_PASSWORD is required}
+      MQTT_MANAGEMENT_USERNAME: management-client
+      MQTT_MANAGEMENT_PASSWORD: ${MQTT_MANAGEMENT_PASSWORD:?MQTT_MANAGEMENT_PASSWORD is required}
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /mosquitto/data/security/password_file && kill -0 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 15s
+    networks: [ocrservice]
+
+  app:
+    build:
+      context: .
+      target: runtime
+      platforms: [linux/amd64]
+      args:
+        ONNXRUNTIME_URL: ${ONNXRUNTIME_URL:-https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz}
+    image: ${APP_IMAGE:-ocrservice:teaching}
+    restart: unless-stopped
+    environment:
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MQTT_SERVER_PASSWORD: ${MQTT_SERVER_PASSWORD:?MQTT_SERVER_PASSWORD is required}
+      MQTT_MANAGEMENT_PASSWORD: ${MQTT_MANAGEMENT_PASSWORD:?MQTT_MANAGEMENT_PASSWORD is required}
+      MQTT_PUBLIC_HOST: ${MQTT_PUBLIC_HOST:?MQTT_PUBLIC_HOST is required}
+    ports:
+      - "8080:8080"
+    volumes:
+      - app-images:/app/data/images
+      - app-logs:/app/data/logs
+      - ./config/server.json.example:/app/config/server.json:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 65s
+    stop_grace_period: 30s
+    networks: [ocrservice]
+
+networks:
+  ocrservice:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  mosquitto-data:
+  app-images:
+  app-logs:
