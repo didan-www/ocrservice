@@ -339,12 +339,16 @@
   - 实现 Unicode 车牌规范化、WHITE/BLACK 分页、keyword 字面量包含和 lookup。
   - 实现全局唯一新增、跨名单稳定冲突码和完整 AccessListRecord。
   - 实现按 ID 幂等删除；不存在返回 404；成功返回严格空信封。
+  - 四路由在 runtime 传输保护和 Bearer 格式校验后先鉴权，再解码 query/path/body；POST/DELETE 拒绝非空 raw query。
+  - DELETE 复用正数 safe integer decoder 并允许前导零；动态 DELETE `/lookup` 在鉴权后按非法 ID 返回 400。
+  - 创建人使用 AuthSession 的用户 ID/显示名快照；Service 自有可注入 UTC 时钟在 insert 前单次采样 `createdAt`。
+  - Repository `unavailable` 映射 503，显式名单冲突映射对应 409，lookup/remove 未命中映射 404，其他技术失败映射 500。
   - 不增加名单 MQTT，也不参与 GateAction。
 - **预计修改文件：**
   - `src/services/access_list/**`
   - `src/http/controllers/access_list/**`
   - `tests/integration/access_list_api/**`
-- **测试：** 覆盖中文/ASCII 大小写、Unicode 空白、`%/_/\`、分页、lookup、重复、跨名单冲突、删除和 10 秒时限。
+- **测试：** 覆盖中文/ASCII 大小写、Unicode 空白、`%/_/\`、分页、lookup、重复、跨名单冲突、删除、四路由鉴权/decoder 优先级、POST/DELETE query/body、DELETE safe ID 与 `/lookup`、创建人/时钟、Repository 错误映射和 10 秒时限。
 - **验收标准：** 满足 AC-018；返回 DTO 字段精确；名单全局唯一；查询参数只解码一次；无 MQTT 副作用。
 - **是否可以并行：** 是，可与 TASK-014、TASK-015、TASK-017 并行。
 

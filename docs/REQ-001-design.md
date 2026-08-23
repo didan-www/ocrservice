@@ -357,6 +357,12 @@ Qt 注销请求的 body 长度固定允许为 0；即使请求携带 `Content-Ty
 
 登录、注销和心跳三个 POST 路由都拒绝非空 raw query。登录不启用 Bearer parser 并忽略 `Authorization` Header；注销和心跳严格解析 Bearer。注销按 Content-Type、Bearer 格式、`authenticate()`、query/body decoder、`logout()` 执行，鉴权阶段不得撤销会话，确保非法 query/body 不会注销有效 Token。心跳按 Content-Type、Bearer 格式、`authenticate()`、query/严格 DTO decoder、`heartbeat()` 执行，使无效或到期 Token 的 401 优先于 DTO 错误。登录 decoder 只要求 `username/password` 是字符串；空值和其他凭据形状错误交给 `AuthService` 统一映射为 `AUTH_INVALID_CREDENTIALS`。
 
+名单四路由复用同一模式。GET/DELETE 使用 runtime 的 `RequestBodyMode::none`，因此非空 body 作为传输错误在 Bearer 解析前返回 400；空 body 时忽略 Content-Type。runtime 完成 Bearer 格式校验后，控制器必须先调用 `authenticate()`，再执行 query、path 或 JSON decoder。分页和 lookup 分别调用现有精确 query decoder；POST 和 DELETE 在鉴权后拒绝非空 raw query，POST 随后调用严格三字段 JSON decoder，DELETE 随后用 `parsePositiveSafeInteger()` 解析 path `id`。该整数 decoder 允许前导零，拒绝符号、空白、小数、百分号编码、零和超过 `2^53-1` 的值。由于动态 DELETE `{id}` 路由匹配静态文本段，`DELETE /api/v1/access-lists/lookup` 在鉴权后返回 400，而不是方法错误。
+
+`AccessListController` 只注入 `IAuthService` 和 `IAccessListService`。创建时把 `Authenticated.session.userId/displayName` 作为可信创建人传给 Service；请求不得提供创建人或创建时间。`AccessListService` 只注入 `IAccessListRepository` 和自身的可替换 UTC 时钟，在 insert 前单次采样毫秒时间并构造 `NewAccessListRecord`。会话中的显示名是登录时快照，也是首版创建时采用的显示名快照；Service 不回查管理员。分页、lookup 和删除不读取时钟。
+
+名单 Service 将 Repository 结果收敛为 `notFound/conflictWhite/conflictBlack/databaseUnavailable/internal`。分页只有 `unavailable` 映射数据库不可用；lookup 空结果和删除 `false` 映射 not found；insert 的显式名单冲突映射对应颜色；所有操作的 `unavailable` 映射数据库不可用；其他技术失败，包括 insert 外键 `notFound`，统一映射 internal。Controller 再集中生成 REQ-001 已定义的精确 HTTP 状态、错误码、中文展示消息和五字段信封。名单模块不依赖 MQTT、识别 Service 或 GateAction。
+
 ### 8.4 Qt 超时兼容预算
 
 Qt 的总时限从发出请求持续到完整响应体接收完成，服务端实现和联调测试必须遵守以下硬边界：
