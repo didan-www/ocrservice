@@ -447,7 +447,16 @@ TOKEN_ONE="${TEST_ROOT}/secrets/device-one-token"
 PASSWORD_ONE="${TEST_ROOT}/secrets/device-one-password"
 SUMMARY_ONE="${TEST_ROOT}/outputs/device-one.json"
 write_secret "$TOKEN_ONE" 'device-one-http-token'
-write_secret "$PASSWORD_ONE" 'device-one-mqtt-password'
+write_secret "$PASSWORD_ONE" 'device-one,mqtt-password'
+
+TOKEN_COMMA="${TEST_ROOT}/secrets/device-comma-token"
+write_secret "$TOKEN_COMMA" 'device,http-token'
+expect_failure "${TEST_ROOT}/token-comma.out" "${TEST_ROOT}/token-comma.err" \
+    run_provision device-comma-token '逗号令牌' device-comma-token-mqtt \
+        "$TOKEN_COMMA" "$PASSWORD_ONE" "${TEST_ROOT}/outputs/token-comma.json"
+assert_contains "${TEST_ROOT}/token-comma.err" 'SECRET_INVALID'
+[[ ! -e ${TEST_ROOT}/outputs/token-comma.json ]] ||
+    fatal 'comma HTTP token wrote a summary'
 
 TOKEN_LINK="${TEST_ROOT}/secrets/device-one-token-link"
 PASSWORD_LINK="${TEST_ROOT}/secrets/device-one-password-link"
@@ -513,9 +522,9 @@ assert_file_mode "$SUMMARY_ONE" 600
 assert_contains "${TEST_ROOT}/provision-one.out" 'stage=SUMMARY_WRITTEN'
 assert_contains "${TEST_ROOT}/provision-one.out" "summary=${SUMMARY_ONE}"
 assert_not_contains "${TEST_ROOT}/provision-one.out" 'device-one-http-token'
-assert_not_contains "${TEST_ROOT}/provision-one.out" 'device-one-mqtt-password'
+assert_not_contains "${TEST_ROOT}/provision-one.out" 'device-one,mqtt-password'
 assert_not_contains "${TEST_ROOT}/provision-one.err" 'device-one-http-token'
-assert_not_contains "${TEST_ROOT}/provision-one.err" 'device-one-mqtt-password'
+assert_not_contains "${TEST_ROOT}/provision-one.err" 'device-one,mqtt-password'
 python3 - "$SUMMARY_ONE" <<'PY'
 import json
 import sys
@@ -538,20 +547,20 @@ PY
 expected_hash=$(printf '%s' 'device-one-http-token' | sha256sum | awk '{print $1}')
 row=$(mysql_exec --execute="SELECT CONCAT(device_id, ':', http_token_hash, ':', mqtt_username, ':', enabled) FROM devices WHERE device_id='device-101'")
 [[ $row == "device-101:${expected_hash}:device-101-mqtt:1" ]] || fatal 'new device row mismatch'
-expect_delivery device-101-mqtt device-one-mqtt-password \
+expect_delivery device-101-mqtt device-one,mqtt-password \
     plate/devices/device-101/recognition-results device-result
-expect_filtered_delivery device-101-mqtt device-one-mqtt-password \
+expect_filtered_delivery device-101-mqtt device-one,mqtt-password \
     'plate/#' plate/devices/device-101/recognition-results device-wildcard-allowed \
     plate/management/recognition-events device-must-not-see-management \
     plate/devices/device-001/recognition-results device-must-not-see-device-one \
     plate/devices/device-101/recognition-results device-wildcard-allowed \
     plate/devices/device-authorization-probe/recognition-results \
         device-must-not-see-device-two
-expect_no_delivery device-101-mqtt device-one-mqtt-password \
+expect_no_delivery device-101-mqtt device-one,mqtt-password \
     'plate/devices/+/recognition-results' \
     plate/devices/device-001/recognition-results device-plus-probe-one \
     plate/devices/device-authorization-probe/recognition-results device-plus-probe-two
-expect_publish_denied device-101-mqtt device-one-mqtt-password \
+expect_publish_denied device-101-mqtt device-one,mqtt-password \
     plate/devices/device-101/recognition-results
 
 device_fragment="${SECURITY_ROOT}/devices/$(printf '%s' device-101 | sha256sum | awk '{print $1}').acl"
@@ -572,7 +581,7 @@ rm -f -- "$duplicate_fragment"
 
 stop_broker
 start_broker
-expect_delivery device-101-mqtt device-one-mqtt-password \
+expect_delivery device-101-mqtt device-one,mqtt-password \
     plate/devices/device-101/recognition-results after-restart
 run_provision device-101 '入口设备一' device-101-mqtt \
     "$TOKEN_ONE" "$PASSWORD_ONE" "$SUMMARY_ONE" \
@@ -630,7 +639,7 @@ run_provision device-101 '入口设备一' device-101-mqtt \
 expect_delivery device-101-mqtt device-one-mqtt-password-rotated \
     plate/devices/device-101/recognition-results rotated-result
 if mosquitto_pub -h 127.0.0.1 -p "$MQTT_TEST_PORT" \
-    -u device-101-mqtt -P device-one-mqtt-password \
+    -u device-101-mqtt -P device-one,mqtt-password \
     -t plate/devices/device-101/recognition-results -m forbidden >/dev/null 2>&1; then
     fatal 'old MQTT password remained valid after rotation'
 fi
@@ -791,7 +800,7 @@ for capture in "${TEST_ROOT}"/*.out "${TEST_ROOT}"/*.err "$BROKER_LOG"; do
     [[ -f $capture ]] || continue
     for secret in \
         task011-server-password task011-management-password \
-        device-one-http-token device-one-mqtt-password \
+        device-one-http-token device-one,mqtt-password \
         device-one-http-token-rotated device-one-mqtt-password-rotated \
         duplicate-user-http-token output-directory-http-token \
         stage-http-token stage-mqtt-password stage-http-token-acl \

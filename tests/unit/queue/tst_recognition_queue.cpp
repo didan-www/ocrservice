@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <future>
 #include <limits>
+#include <new>
 #include <mutex>
+#include <cstdlib>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -15,6 +18,28 @@
 #include <gtest/gtest.h>
 
 #include "RecognitionTaskQueue.h"
+
+namespace {
+thread_local bool gFailAllocations = false;
+}
+
+void* operator new(const std::size_t size) {
+    if (gFailAllocations) {
+        throw std::bad_alloc();
+    }
+    if (void* const allocation = std::malloc(size)) {
+        return allocation;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* const pointer) noexcept {
+    std::free(pointer);
+}
+
+void operator delete(void* const pointer, std::size_t) noexcept {
+    std::free(pointer);
+}
 
 namespace {
 
@@ -188,6 +213,48 @@ TEST(RecognitionTaskQueueTest, StopAcceptingRejectsNewReservationsButHonorsExist
     const auto taken = queue.take();
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(idOf(*taken), idOf(task(30U)));
+}
+
+TEST(RecognitionTaskQueueTest, PreallocatedCommitsDoNotAllocateAndPreserveGateFifo) {
+    RecognitionTaskQueue queue(2U);
+    auto firstReservation = queue.tryReserve();
+    auto secondReservation = queue.tryReserve();
+    ASSERT_TRUE(firstReservation.has_value());
+    ASSERT_TRUE(secondReservation.has_value());
+    EXPECT_EQ(queue.reservedCount(), 2U);
+    queue.stopAccepting();
+
+    auto firstTask = task(31U);
+    auto secondTask = task(32U);
+    std::optional<ocrservice::queue::TaskStartGate> firstGate;
+    std::optional<ocrservice::queue::TaskStartGate> secondGate;
+    bool commitThrew = false;
+    gFailAllocations = true;
+    try {
+        firstGate.emplace(firstReservation->commit(std::move(firstTask)));
+        secondGate.emplace(secondReservation->commit(std::move(secondTask)));
+    } catch (...) {
+        commitThrew = true;
+    }
+    gFailAllocations = false;
+
+    EXPECT_FALSE(commitThrew);
+    ASSERT_TRUE(firstGate.has_value());
+    ASSERT_TRUE(secondGate.has_value());
+    EXPECT_EQ(queue.reservedCount(), 0U);
+    EXPECT_EQ(queue.queueDepth(), 2U);
+    secondGate->open();
+
+    auto consumer = std::async(std::launch::async, [&queue] { return queue.take(); });
+    EXPECT_EQ(consumer.wait_for(50ms), std::future_status::timeout);
+    firstGate.reset();
+    ASSERT_EQ(consumer.wait_for(2s), std::future_status::ready);
+    const auto firstTaken = consumer.get();
+    ASSERT_TRUE(firstTaken.has_value());
+    EXPECT_EQ(idOf(*firstTaken), idOf(task(31U)));
+    const auto secondTaken = queue.take();
+    ASSERT_TRUE(secondTaken.has_value());
+    EXPECT_EQ(idOf(*secondTaken), idOf(task(32U)));
 }
 
 TEST(RecognitionTaskQueueTest, StopWakesConsumersAndDropsEveryUnstartedOpportunity) {

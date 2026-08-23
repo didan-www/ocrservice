@@ -130,7 +130,7 @@ public:
         return result;
     }
 
-    int renameAt(
+    int renameNoReplaceAt(
         const int oldDirectoryFd,
         const char* oldPath,
         const int newDirectoryFd,
@@ -139,7 +139,8 @@ public:
             errno = EIO;
             return -1;
         }
-        return delegate_->renameAt(oldDirectoryFd, oldPath, newDirectoryFd, newPath);
+        return delegate_->renameNoReplaceAt(
+            oldDirectoryFd, oldPath, newDirectoryFd, newPath);
     }
 
     int unlinkAt(const int directoryFd, const char* path, const int flags) noexcept override {
@@ -284,6 +285,26 @@ TEST(PosixImageStorageTest, UsesDecodedPngFormatAndRejectsMismatchedCommandForma
     auto mismatched = save(
         storage, png, recognitionId(3U), capturedAt(), ImageFormat::jpeg);
     expectFailure(mismatched, StorageFailure::invalidImage);
+    EXPECT_EQ(regularFileCount(root.path()), 1U);
+}
+
+TEST(PosixImageStorageTest, ExistingFinalImageIsNeverOverwritten) {
+    TemporaryDirectory root;
+    PosixImageStorage storage(root.path());
+    const auto id = recognitionId(25U);
+    const auto firstBytes = encode(".jpg");
+    auto firstResult = save(storage, firstBytes, id, capturedAt(), ImageFormat::jpeg);
+    ASSERT_TRUE(std::holds_alternative<StoredImage>(firstResult));
+    const auto path = std::get<StoredImage>(firstResult).relativePath();
+
+    auto secondBytes = firstBytes;
+    secondBytes.push_back(0U);
+    auto secondResult = save(storage, secondBytes, id, capturedAt(), ImageFormat::jpeg);
+    expectFailure(secondResult, StorageFailure::alreadyExists);
+
+    auto openedResult = storage.openForRead(path);
+    ASSERT_TRUE(std::holds_alternative<domain::ImageFile>(openedResult));
+    EXPECT_EQ(readAll(std::get<domain::ImageFile>(openedResult)), firstBytes);
     EXPECT_EQ(regularFileCount(root.path()), 1U);
 }
 

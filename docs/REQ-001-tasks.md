@@ -39,7 +39,7 @@
 | `src/http/controllers/auth/`、`src/http/controllers/client/` | TASK-014 |
 | `src/http/controllers/recognition/`、History/CSV Service、`src/domain/Ports.*` | TASK-015；`Ports.*` 仅限历史 pull cursor Port |
 | `src/http/controllers/access_list/` 和 AccessList Service | TASK-016 |
-| `src/http/controllers/device_recognition/` 和 `src/services/recognition/acceptance/` | TASK-017 |
+| `src/http/controllers/device_recognition/`、`src/services/recognition/acceptance/`、`tests/integration/device_upload_api/` | TASK-017；另获最小授权修改 `src/domain/Ports.h` 的 `StorageFailure::alreadyExists`、`src/queue/RecognitionTaskQueue.*`、`tests/unit/queue/**`、`src/storage/PosixFileOps.*`、`src/storage/PosixImageStorage.*`、`tests/component/storage/**`，以及为统一 HTTP Token 逗号规则所需的 TASK-011 `scripts/provision-device.sh`、`tests/component/mosquitto_scripts/tst_mosquitto_scripts.sh` |
 | `src/services/recognition/worker/` | TASK-018 |
 | `src/app/runtime/`、`src/main.cpp`、Health 控制器和 Service | TASK-019 |
 | Dockerfile、Compose、容器入口和 `.env.example` | TASK-020 |
@@ -245,6 +245,7 @@
   - 实现 `init-mosquitto.sh`，原子生成/更新 password、基础 ACL 和设备 ACL 合并结果。
   - 固定服务端账号仅写两个主题范围，管理账号仅读管理主题。
   - 实现 `provision-device.sh`，串行更新 MySQL、设备 password/ACL、重载 Broker并输出嵌入式配置。
+  - 对单行 secret 保持独立字符规则：HTTP Token 拒绝逗号，设备 MQTT 密码允许逗号。
   - 明确部分失败步骤和幂等重跑结果，不宣称跨系统事务。
 - **预计修改文件：**
   - `scripts/init-mosquitto.sh`
@@ -252,7 +253,7 @@
   - `deploy/mosquitto/mosquitto.conf`
   - `deploy/mosquitto/acl.base.template`
   - `tests/component/mosquitto_scripts/**`
-- **测试：** 在临时卷和 MySQL/Mosquitto 容器中覆盖空初始化、重复运行、缺少 secret、账号重复、设备只能订阅自己主题和脚本中途失败。
+- **测试：** 在临时卷和 MySQL/Mosquitto 容器中覆盖空初始化、重复运行、缺少或非法 secret、HTTP Token 逗号拒绝、MQTT 密码逗号接受、账号重复、设备只能订阅自己主题和脚本中途失败。
 - **验收标准：** 应用/Broker 使用同一组变量；管理凭据可 CONNECT+SUBACK；设备无法订阅其他设备或管理主题；脚本日志无密码。
 - **是否可以并行：** 是，可与 TASK-009、TASK-010、TASK-013 并行。
 
@@ -357,16 +358,22 @@
 - **目标：** 实现设备 multipart 上传、幂等、队列预留和 PROCESSING 发布流程。
 - **前置依赖：** TASK-004、TASK-005、TASK-006、TASK-009、TASK-012、TASK-013。
 - **主要工作：**
-  - 验证设备 Token 归属/enabled、路径 deviceId、multipart 精确三字段和 capturedAt/captureId。
+  - 验证设备 Token 的可见 ASCII/长度/逗号规则、归属/enabled、路径 deviceId、multipart 精确三字段和 capturedAt/captureId。
   - 先检查幂等，再预留队列槽位；满载立即 503，且不保存文件、不插库。
   - 保存图片并在事务内插入 PROCESSING；失败按顺序补偿。
   - 提交队列后返回 202；同键同摘要返回原记录，不同输入返回 409。
   - PROCESSING 提交且图片可下载后，尽力发布管理事件。
+  - 固定严格 CRLF multipart、鉴权和错误优先级、startedAt 采样、无覆盖存储、最多 8 个 UUID v4 候选以及并发唯一冲突裁决。
+  - 增强 QueueReservation，使 reserve 预分配 commit 节点/gate，正常有效 commit 不分配、不抛且不漏任务；Acceptance service 提供 `stopAcceptingAndWait()` 供 TASK-019 组合。
 - **预计修改文件：**
   - `src/services/recognition/acceptance/**`
   - `src/http/controllers/device_recognition/**`
   - `tests/integration/device_upload_api/**`
-- **测试：** 覆盖鉴权、未知 multipart 字段、格式/大小/尺寸、串行和并发 capture 重试、冲突、队列满、存储失败、数据库失败和图片立即下载。
+  - `src/domain/Ports.h`（仅 `StorageFailure::alreadyExists`）
+  - `src/queue/RecognitionTaskQueue.*`、`tests/unit/queue/**`
+  - `src/storage/PosixFileOps.*`、`src/storage/PosixImageStorage.*`、`tests/component/storage/**`
+  - `scripts/provision-device.sh`、`tests/component/mosquitto_scripts/tst_mosquitto_scripts.sh`（仅统一 HTTP Token 逗号规则所需的最小 TASK-011 ownership correction）
+- **测试：** 覆盖鉴权和错误优先级、严格 multipart delimiter/header/CRLF、未知字段、格式/大小/尺寸、串行和并发 capture 重试、UUID/路径碰撞、冲突、队列满、存储失败、数据库失败、图片立即下载、MQTT 返回失败/抛异常、每个 202 恰一任务和 stopAccepting 与 in-flight 等待。
 - **验收标准：** 满足 AC-005 至 AC-009、AC-023 的受理部分；任何 202 都有唯一 PROCESSING 记录、完整图片和一次队列任务；满载无残留。
 - **是否可以并行：** 是，可与 TASK-014、TASK-015、TASK-016 并行。
 
@@ -395,7 +402,7 @@
   - HTTP 监听前保证模型/MySQL 可用；MQTT 不可用时以 DEGRADED 启动。
   - 启动事务将遗留 PROCESSING 改为 FAILED/SERVER_RESTARTED，首次 MQTT 连接时每条尽力发布一次。
   - 实现 `/health` 精确 DTO 和 MySQL/模型/MQTT/队列状态。
-  - 实现信号安全停止、拒绝新上传、停止队列/worker、断开 MQTT、关闭 MySQL 和 flush 日志。
+  - 实现信号安全停止；先调用 TASK-017 `stopAcceptingAndWait()` 等待 in-flight 受理归零，再 requestStop 队列/worker、断开 MQTT、关闭 MySQL 和 flush 日志。
 - **预计修改文件：**
   - `src/app/runtime/**`
   - `src/services/health/**`

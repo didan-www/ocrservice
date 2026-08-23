@@ -19,7 +19,7 @@ public:
     virtual ssize_t read(int fd, void* data, std::size_t size) noexcept = 0;
     virtual int sync(int fd) noexcept = 0;
     virtual int close(int fd) noexcept = 0;
-    virtual int renameAt(
+    virtual int renameNoReplaceAt(
         int oldDirectoryFd,
         const char* oldPath,
         int newDirectoryFd,

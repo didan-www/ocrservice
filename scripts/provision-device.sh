@@ -447,6 +447,7 @@ http_token=''
 mqtt_password=''
 read_secret_file "$http_token_file" http_token
 read_secret_file "$mqtt_password_file" mqtt_password
+[[ $http_token != *,* ]] || fail "SECRET_INVALID"
 
 exec 9>>"$LOCK_FILE"
 flock -w "$LOCK_TIMEOUT_SECONDS" 9 || fail "LOCK_TIMEOUT"

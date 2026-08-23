@@ -355,10 +355,12 @@ domain::StorageResult<domain::StoredImage> PosixImageStorage::saveAtomically(
         }
 
         const auto finalName = recognitionId + extension;
-        if (fileOps_->renameAt(
+        if (fileOps_->renameNoReplaceAt(
                 day.get(), temporaryName.c_str(), day.get(), finalName.c_str()) != 0) {
+            const int renameError = errno;
             unlinkForCleanup(fileOps_, day.get(), temporaryName);
-            return domain::StorageFailure::writeFailed;
+            return renameError == EEXIST ? domain::StorageFailure::alreadyExists
+                                         : domain::StorageFailure::writeFailed;
         }
         if (fileOps_->sync(day.get()) != 0) {
             unlinkForCleanup(fileOps_, day.get(), finalName);

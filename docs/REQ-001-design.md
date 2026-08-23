@@ -405,11 +405,17 @@ Qt 的总时限从发出请求持续到完整响应体接收完成，服务端�
 
 ### 10.1 设备鉴权
 
-设备 Token 先做 SHA-256，再按摘要查询 `devices`。Repository 只返回 Token 所属设备和 enabled 状态。路径 `deviceId` 与 Token 归属不一致返回 `DEVICE_FORBIDDEN`；禁用返回 `DEVICE_DISABLED`；Token 无效返回 `DEVICE_UNAUTHORIZED`。摘要比较使用 OpenSSL 常量时间函数。
+设备 Token 必须为 1 至 256 字节可见 ASCII `0x21..0x7E` 且不得包含逗号 `0x2C`。形状合法后使用 OpenSSL EVP 计算 SHA-256，再按摘要查询 `devices`，并使用 `CRYPTO_memcmp` 对返回摘要做常量时间复验。缺失、形状非法、摘要未知或复验失败统一返回 `DEVICE_UNAUTHORIZED`。Repository 只返回 Token 所属设备和 enabled 状态；`unavailable` 映射 `DATABASE_UNAVAILABLE`，其余技术失败映射 `INTERNAL_ERROR`。
+
+固定优先级为 Token lookup、路径 `deviceId` 语法与归属、enabled、raw query、multipart decoder。路径语法非法返回 `INVALID_REQUEST`；路径与 Token 归属不一致优先返回 `DEVICE_FORBIDDEN`，即使 Token 所属设备同时 disabled 也不泄露该状态；仅归属匹配后才返回 `DEVICE_DISABLED`。上传 URL 的 raw query 必须为空。
 
 ### 10.2 multipart 和图片校验
 
-上传控制器先限制整个请求，再解析精确三个且不重复的 part。图片最大 10 MiB。服务端不相信文件名、扩展名或 multipart MIME：
+上传控制器先限制整个请求，再以严格边界感知 decoder 解析精确三个且不重复的 part。body 必须从初始 `--boundary\r\n` 开始，不接受 preamble、epilogue、LF-only、header folding，closing delimiter 后只允许为空或单个 CRLF。只有后随 CRLF 或 `--` 的完整 delimiter 行才是分隔符，图片正文中的 boundary 子串和 NUL 保持原字节。
+
+part 顺序任意，名称和值区分大小写并精确为 `image/captureId/capturedAt`。每个 part header block 最大 8 KiB，强制唯一 `Content-Disposition: form-data` 和唯一 `name`；拒绝未知或重复 header/参数和 transfer encoding。`image` 可带一个有界 filename 和可选的语法合法 MIME，但两者完全忽略；文本 part 不允许 filename，Content-Type 省略或精确为 `text/plain` 加可选唯一 `charset=utf-8`。文本值不 trim，空值、NUL 和首尾换行按非法字段拒绝。
+
+图片最大 10 MiB。服务端不相信文件名、扩展名或 multipart MIME：
 
 1. 检查 JPEG/PNG 魔数。
 2. 使用 OpenCV `imdecode` 实际解码。
@@ -431,7 +437,8 @@ authenticate and validate request
       -> different: 409 CAPTURE_ID_CONFLICT
  -> reserve one queue slot atomically
       -> unavailable: 503, no file, no row
- -> generate recognitionId and server relative path
+ -> sample startedAt once
+ -> generate recognitionId and server relative path (at most 8 UUID-v4 candidates)
  -> atomically save original compressed bytes
  -> begin MySQL transaction
  -> insert PROCESSING revision=1
@@ -442,18 +449,18 @@ authenticate and validate request
  -> return HTTP 202
 ```
 
-start gate 防止极快推理在线程竞争下先发布 final revision 2、随后才发布 PROCESSING revision 1。无论 PROCESSING 发布成功或失败，发布尝试返回后都必须打开 gate；MQTT 失败不能阻塞识别。
+`startedAt` 在 reserve 成功后、存图前采样一次 UTC 毫秒墙上时钟。start gate 防止极快推理在线程竞争下先发布 final revision 2、随后才发布 PROCESSING revision 1。无论 PROCESSING 发布返回失败或抛出异常，scope guard 都必须打开 gate；MQTT 失败不能阻塞识别或改变 HTTP 成功结果。
 
 数据库唯一键是并发幂等的最终裁决。若两个首次请求同时查询为空：
 
 1. 两者可分别预留槽位并写入不同 `recognitionId` 文件。
 2. 一个插入成功；另一个收到唯一键冲突。
-3. 失败方回滚、删除自己文件、释放自己槽位，再查询胜出记录。
-4. 摘要和拍摄时间相同则返回胜出记录；否则返回 409。
+3. 失败方回滚、删除自己的无覆盖文件、释放自己槽位，再查询 `(deviceId,captureId)` 胜出记录。
+4. 胜出记录存在且摘要和拍摄时间相同则返回其原状态，否则返回 409；若 capture 记录不存在但候选主键已经存在，则更换 UUID v4 候选，最多共尝试 8 个。
 
 这样不会把并发唯一键冲突误报为 500，也不会残留第二个任务。
 
-`QueueReservation` 使用 RAII：未显式提交时析构自动归还槽位。容量统计包含已预留但尚未可执行的任务，确保已受理任务一定能入队。
+`QueueReservation` 使用 RAII：`tryReserve()` 必须预分配后续 commit 所需的队列节点和 gate，未显式提交时析构自动归还槽位。正常未 `requestStop()` 的有效 reservation 在数据库提交后的 `commit()` 不再分配、不得抛异常或静默漏任务。容量统计包含已预留但尚未可执行的任务，保持 commit FIFO，确保已受理任务一定能入队。
 
 ## 11. 图片存储与补偿
 
@@ -464,19 +471,19 @@ start gate 防止极快推理在线程竞争下先发布 final revision 2、随�
 1. 在目标目录创建不可预测的临时文件，使用 `O_CREAT|O_EXCL`。
 2. 循环写入全部原始压缩字节。
 3. `fsync` 临时文件并关闭。
-4. 原子 `rename` 到最终文件名。
+4. 以不覆盖既有最终文件的原子提交操作安装最终文件；已存在返回独立 `alreadyExists` 分类，不修改原文件。
 5. `fsync` 父目录。
 
-失败时删除临时文件。最终文件成功而数据库插入失败时执行 best-effort 删除；删除失败记录脱敏日志，但返回数据库/存储对应错误，不伪造受理成功。
+失败时删除临时文件。最终文件成功而数据库插入失败时执行 best-effort 删除；删除失败记录脱敏日志，但返回数据库/存储对应错误，不伪造受理成功。`writeFailed` 映射 `IMAGE_STORAGE_ERROR`，存储内部失败映射 `INTERNAL_ERROR`，`alreadyExists` 只用于切换 UUID 候选且最多尝试 8 个。
 
 图片下载先从 MySQL 获取相对路径和 MIME，再以 `IMAGE_ROOT` 目录文件描述符为根安全打开；规范化结果必须仍位于根目录内。记录或文件缺失统一返回 404 `IMAGE_NOT_FOUND`。首版不自动删除图片。
 
 ## 12. 识别队列与工作线程
 
-有界队列内部由 mutex、condition variable、deque、reserved count 和 accepting 标志组成。公开操作只有：
+有界队列内部由 mutex、condition variable、预分配 pending node、FIFO ready list、reserved count 和 accepting 标志组成。公开操作只有：
 
 - `tryReserve()`：非阻塞获取 RAII 槽位。
-- `commit(task)`：把预留转换为可见任务。
+- `commit(task)`：无分配、无异常地把正常有效预留转换为可见任务。
 - `take(stopToken)`：worker 等待任务或停止。
 - `stopAccepting()`：拒绝新预留。
 - `requestStop()`：唤醒等待线程。
@@ -719,7 +726,7 @@ Mosquitto 2.0.11 内置 ACL 不提供独立的 subscribe ACL 类型。管理端�
 
 ### 16.2 设备开通事务和数据编码
 
-`provision-device.sh` 在共享锁内依次执行输入校验、MySQL 事务、password 原子替换、设备片段与合并 ACL 原子替换、SIGHUP 和摘要文件输出。固定必选参数为 `--device-id/--device-name/--mqtt-username/--http-token-file/--mqtt-password-file/--http-base-url/--output`，只有 `--rotate` 可选；独立 seen 状态拒绝所有重复 option，包括首次为空的情况。`--output` 不接受 `-`、控制字符或 symlink，规范化后不得与 secret 输入为同一文件、位于安全根内或等于 pid/template 路径，stdout 不输出 secret JSON。开通前再次把 template、渲染结果和现有 base ACL 分别与 canonical 内容精确比较。MySQL 事务先按 `device_id` 锁定读取，再按需求规定的幂等/轮换矩阵执行显式 insert 或 update；不得使用会隐藏唯一键冲突的宽松 upsert。
+`provision-device.sh` 在共享锁内依次执行输入校验、MySQL 事务、password 原子替换、设备片段与合并 ACL 原子替换、SIGHUP 和摘要文件输出。固定必选参数为 `--device-id/--device-name/--mqtt-username/--http-token-file/--mqtt-password-file/--http-base-url/--output`，只有 `--rotate` 可选；独立 seen 状态拒绝所有重复 option，包括首次为空的情况。两个 secret 都限制为单行、1 至 256 字节可见 ASCII；HTTP Token 额外拒绝逗号，MQTT 密码允许逗号。`--output` 不接受 `-`、控制字符或 symlink，规范化后不得与 secret 输入为同一文件、位于安全根内或等于 pid/template 路径，stdout 不输出 secret JSON。开通前再次把 template、渲染结果和现有 base ACL 分别与 canonical 内容精确比较。MySQL 事务先按 `device_id` 锁定读取，再按需求规定的幂等/轮换矩阵执行显式 insert 或 update；不得使用会隐藏唯一键冲突的宽松 upsert。
 
 脚本通过严格校验和十六进制 SQL 字面量传递设备 ID、名称、HTTP SHA-256 和 MQTT 用户名，不把原始输入拼接为引号字符串。MySQL 密码只通过继承的进程环境传给客户端、Docker 和 PID namespace 测试进程，不以 `NAME=value` 或其他形式出现在 argv。新建设备写入两个 UTC 时间；重新启用或轮换只更新必要字段和 `updated_at`。
 
@@ -760,8 +767,8 @@ Docker healthcheck 调用 `/health`，Compose `depends_on` 只辅助启动顺序
 
 SIGTERM/SIGINT 只在信号安全处理器中设置停止标志并唤醒主线程。主线程依次：
 
-1. 让上传路由返回 503 并停止新队列预留。
-2. 停止 HTTP 接受新连接。
+1. 调用 Acceptance service 的 `stopAcceptingAndWait()`：先让新上传返回 503 并停止新队列预留，再等待所有 in-flight 受理完成 commit 或补偿。
+2. 停止 HTTP 接受新连接；只有 in-flight acceptance 归零后才能调用 queue `requestStop()`。
 3. 请求 worker 在当前阶段结束后停止，并丢弃尚未开始任务的内存执行机会；数据库记录保持 PROCESSING。
 4. 断开 MQTT。
 5. 关闭连接池并 flush 日志。

@@ -1,9 +1,10 @@
 #include "RecognitionTaskQueue.h"
 
 #include <condition_variable>
-#include <deque>
+#include <list>
 #include <mutex>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace ocrservice::queue {
@@ -14,7 +15,7 @@ struct StartGateState final {
 };
 
 struct QueuedTask final {
-    domain::RecognitionTask task;
+    std::optional<domain::RecognitionTask> task;
     std::shared_ptr<StartGateState> gate;
 };
 
@@ -24,7 +25,7 @@ struct QueueSharedState final {
 
     mutable std::mutex mutex;
     std::condition_variable changed;
-    std::deque<QueuedTask> tasks;
+    std::list<std::shared_ptr<QueuedTask>> tasks;
     std::size_t reserved = 0U;
     const std::size_t capacity;
     bool accepting = true;
@@ -86,11 +87,15 @@ void TaskStartGate::openNoThrow() noexcept {
     }
 }
 
-QueueReservation::QueueReservation(std::shared_ptr<detail::QueueSharedState> state)
-    : state_(std::move(state)) {}
+QueueReservation::QueueReservation(
+    std::shared_ptr<detail::QueueSharedState> state,
+    std::list<std::shared_ptr<detail::QueuedTask>> pendingNode)
+    : state_(std::move(state)), pendingNode_(std::move(pendingNode)) {}
 
 QueueReservation::QueueReservation(QueueReservation&& other) noexcept
-    : state_(std::move(other.state_)), active_(other.active_) {
+    : state_(std::move(other.state_)),
+      pendingNode_(std::move(other.pendingNode_)),
+      active_(other.active_) {
     other.active_ = false;
 }
 
@@ -98,6 +103,7 @@ QueueReservation& QueueReservation::operator=(QueueReservation&& other) {
     if (this != &other) {
         cancel();
         state_ = std::move(other.state_);
+        pendingNode_ = std::move(other.pendingNode_);
         active_ = other.active_;
         other.active_ = false;
     }
@@ -109,23 +115,27 @@ QueueReservation::~QueueReservation() {
 }
 
 TaskStartGate QueueReservation::commit(domain::RecognitionTask task) {
-    if (!active_ || state_ == nullptr) {
+    if (!active_ || state_ == nullptr || pendingNode_.size() != 1U) {
         throw std::logic_error("queue reservation is not active");
     }
-    auto gate = std::make_shared<detail::StartGateState>();
+    static_assert(std::is_nothrow_move_constructible_v<domain::RecognitionTask>);
+    const auto slot = pendingNode_.front();
+    const auto gate = slot->gate;
+    slot->task.emplace(std::move(task));
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (state_->reserved == 0U) {
             throw std::logic_error("queue reservation count is inconsistent");
         }
         if (!state_->stopRequested) {
-            state_->tasks.push_back(detail::QueuedTask{std::move(task), gate});
+            state_->tasks.splice(state_->tasks.end(), pendingNode_);
         }
         --state_->reserved;
         active_ = false;
     }
     state_->changed.notify_all();
-    return TaskStartGate(state_, std::move(gate));
+    pendingNode_.clear();
+    return TaskStartGate(state_, gate);
 }
 
 void QueueReservation::cancel() {
@@ -139,6 +149,7 @@ void QueueReservation::cancel() {
         }
         active_ = false;
     }
+    pendingNode_.clear();
     state_->changed.notify_all();
 }
 
@@ -159,8 +170,12 @@ std::optional<QueueReservation> RecognitionTaskQueue::tryReserve() {
         state_->tasks.size() + state_->reserved >= state_->capacity) {
         return std::nullopt;
     }
+    auto slot = std::make_shared<detail::QueuedTask>();
+    slot->gate = std::make_shared<detail::StartGateState>();
+    std::list<std::shared_ptr<detail::QueuedTask>> pendingNode;
+    pendingNode.push_back(std::move(slot));
     ++state_->reserved;
-    return QueueReservation(state_);
+    return QueueReservation(state_, std::move(pendingNode));
 }
 
 std::optional<domain::RecognitionTask> RecognitionTaskQueue::take() {
@@ -168,12 +183,12 @@ std::optional<domain::RecognitionTask> RecognitionTaskQueue::take() {
     std::unique_lock<std::mutex> lock(state->mutex);
     state->changed.wait(lock, [&state] {
         return state->stopRequested ||
-               (!state->tasks.empty() && state->tasks.front().gate->open);
+               (!state->tasks.empty() && state->tasks.front()->gate->open);
     });
     if (state->stopRequested) {
         return std::nullopt;
     }
-    auto task = std::move(state->tasks.front().task);
+    auto task = std::move(*state->tasks.front()->task);
     state->tasks.pop_front();
     lock.unlock();
     state->changed.notify_all();

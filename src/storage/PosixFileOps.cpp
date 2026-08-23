@@ -3,6 +3,8 @@
 #include <cstdio>
 
 #include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace ocrservice::storage::detail {
@@ -40,12 +42,18 @@ public:
     int sync(const int fd) noexcept override { return ::fsync(fd); }
     int close(const int fd) noexcept override { return ::close(fd); }
 
-    int renameAt(
+    int renameNoReplaceAt(
         const int oldDirectoryFd,
         const char* oldPath,
         const int newDirectoryFd,
         const char* newPath) noexcept override {
-        return ::renameat(oldDirectoryFd, oldPath, newDirectoryFd, newPath);
+        return static_cast<int>(::syscall(
+            SYS_renameat2,
+            oldDirectoryFd,
+            oldPath,
+            newDirectoryFd,
+            newPath,
+            RENAME_NOREPLACE));
     }
 
     int unlinkAt(const int directoryFd, const char* path, const int flags) noexcept override {

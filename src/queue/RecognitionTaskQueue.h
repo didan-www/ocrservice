@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <list>
 #include <memory>
 #include <optional>
 
@@ -14,6 +15,7 @@ constexpr std::size_t kDefaultRecognitionQueueCapacity = 20U;
 namespace detail {
 struct QueueSharedState;
 struct StartGateState;
+struct QueuedTask;
 }  // namespace detail
 
 class TaskStartGate final {
@@ -57,9 +59,12 @@ public:
 private:
     friend class RecognitionTaskQueue;
 
-    explicit QueueReservation(std::shared_ptr<detail::QueueSharedState> state);
+    QueueReservation(
+        std::shared_ptr<detail::QueueSharedState> state,
+        std::list<std::shared_ptr<detail::QueuedTask>> pendingNode);
 
     std::shared_ptr<detail::QueueSharedState> state_;
+    std::list<std::shared_ptr<detail::QueuedTask>> pendingNode_;
     bool active_ = true;
 };
 

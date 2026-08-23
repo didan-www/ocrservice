@@ -323,7 +323,14 @@ private:
 using HistoryVisitor = std::function<bool(const RecognitionRecord&)>;
 
 enum class RepositoryFailure { unavailable, conflict, notFound, stateConflict, internal };
-enum class StorageFailure { notFound, invalidImage, writeFailed, readFailed, internal };
+enum class StorageFailure {
+    notFound,
+    alreadyExists,
+    invalidImage,
+    writeFailed,
+    readFailed,
+    internal
+};
 enum class PublishFailure { notConnected, brokerRejected, transportError, stopping };
 
 template <typename T, typename Error>
