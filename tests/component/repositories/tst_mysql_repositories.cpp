@@ -466,8 +466,7 @@ TEST_F(MySqlRepositoryTest, HistoryUsesHalfOpenFilterStableOrderAndSafeOffset) {
     EXPECT_EQ(page.items()[1].snapshot().recognitionId(), recognitionId(51U));
     EXPECT_EQ(page.items()[2].snapshot().recognitionId(), recognitionId(50U));
 
-    auto beyond = repository.queryHistory(
-        filter, PageRequest(ocrservice::domain::kJsonSafeIntegerMaximum));
+    auto beyond = repository.queryHistory(filter, PageRequest(PageRequest::maximumPage()));
     ASSERT_TRUE(std::holds_alternative<ocrservice::domain::PageResult<RecognitionRecord>>(beyond));
     EXPECT_EQ(std::get<ocrservice::domain::PageResult<RecognitionRecord>>(beyond).total(), 3U);
     EXPECT_TRUE(std::get<ocrservice::domain::PageResult<RecognitionRecord>>(beyond).items().empty());
