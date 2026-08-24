@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "recognitionId": "a15c7268-b211-4a4c-a765-49b922af1910",
+  "revision": 1,
+  "deviceId": "device-001",
+  "status": "PROCESSING",
+  "plateNumber": null,
+  "errorCode": null,
+  "errorMessage": null,
+  "capturedAt": "2026-08-15T12:30:44.000+08:00",
+  "startedAt": "2026-08-15T12:30:45.000+08:00",
+  "completedAt": null,
+  "durationMs": null
+}

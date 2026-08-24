@@ -1,0 +1,7 @@
+{
+  "success": false,
+  "code": "IMAGE_NOT_FOUND",
+  "message": "识别图片不存在",
+  "requestId": "4a4911ce-041c-42ad-bff9-1dd5dc70de66",
+  "data": null
+}

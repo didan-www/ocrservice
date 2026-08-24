@@ -448,9 +448,17 @@
 - **主要工作：**
   - 导入或调用 Qt 合法/非法信封、RecognitionSnapshot、分页和 AccessListRecord fixture。
   - 对服务端输出执行 exact key、null、safe integer、时间和 MIME 断言，并由 Qt parser 做最终解析。
+  - 镜像 Qt parser 的分页 `int` 边界；本任务发现服务端原 `PageRequest` 只按 JSON safe integer 放行，因此将历史和名单公共 `page` 上限统一收紧为 2147483647，并在领域类型、query decoder 和真实 HTTP 契约测试中建立边界门禁。
   - 覆盖 raw query 的 `+08:00`、中文、百分号和空 body 注销。
   - 覆盖图片/CSV 错误 JSON、CSV 中途断流和 Qt 总时限。
 - **预计修改文件：**
+  - `docs/REQ-001.md`
+  - `docs/REQ-001-design.md`
+  - `docs/REQ-001-tasks.md`
+  - `src/domain/Recognition.h`
+  - `src/domain/Recognition.cpp`
+  - `tests/unit/domain/tst_domain.cpp`
+  - `tests/unit/http_protocol/tst_http_protocol.cpp`
   - `tests/fixtures/qt/**`
   - `tests/contract/qt_http/**`
   - `tests/contract/qt_mqtt/**`

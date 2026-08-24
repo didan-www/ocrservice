@@ -124,6 +124,9 @@ public:
     static constexpr std::uint64_t pageSize() noexcept {
         return 100U;
     }
+    static constexpr std::uint64_t maximumPage() noexcept {
+        return 2147483647U;
+    }
 
     explicit PageRequest(std::uint64_t page);
     std::uint64_t page() const noexcept;

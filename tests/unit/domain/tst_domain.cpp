@@ -252,10 +252,12 @@ TEST(FilterTest, KeepsPagingSeparateAndValidatesHalfOpenRange) {
     EXPECT_THROW(HistoryFilter(UtcTimePoint(100), UtcTimePoint(100)), DomainError);
     EXPECT_THROW(HistoryFilter(UtcTimePoint(200), UtcTimePoint(100)), DomainError);
 
-    const PageRequest page(1U);
-    EXPECT_EQ(page.page(), 1U);
+    const PageRequest page(PageRequest::maximumPage());
+    EXPECT_EQ(page.page(), 2147483647U);
     EXPECT_EQ(PageRequest::pageSize(), 100U);
+    EXPECT_EQ(PageRequest::maximumPage(), 2147483647U);
     EXPECT_THROW(PageRequest(0U), DomainError);
+    EXPECT_THROW(PageRequest(PageRequest::maximumPage() + 1U), DomainError);
     EXPECT_THROW(PageRequest(kJsonSafeIntegerMaximum + 1U), DomainError);
 
     const AccessListFilter access(AccessListType::white, PlateKeyword::parse(" ab "));

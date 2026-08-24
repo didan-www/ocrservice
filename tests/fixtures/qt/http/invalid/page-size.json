@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "code": "OK",
+  "message": "",
+  "requestId": "4a4911ce-041c-42ad-bff9-1dd5dc70de66",
+  "data": {
+    "items": [],
+    "page": 1,
+    "pageSize": 99,
+    "total": 0
+  }
+}

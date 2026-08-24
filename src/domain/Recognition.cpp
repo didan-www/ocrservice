@@ -216,6 +216,9 @@ const PlateKeyword& AccessListFilter::keyword() const noexcept { return keyword_
 
 PageRequest::PageRequest(const std::uint64_t page) : page_(page) {
     requirePositiveJsonSafe(page_, "page");
+    if (page_ > maximumPage()) {
+        throw DomainError("page exceeds the supported maximum");
+    }
 }
 std::uint64_t PageRequest::page() const noexcept { return page_; }
 

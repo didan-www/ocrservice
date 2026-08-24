@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "code": "OK",
+  "message": "",
+  "requestId": "4a4911ce-041c-42ad-bff9-1dd5dc70de66",
+  "data": {
+    "displayName": "演示管理员",
+    "accessToken": "opaque-token",
+    "expiresAt": "2026-08-15T20:30:00.000+08:00",
+    "mqtt": {
+      "host": "192.168.137.128",
+      "port": 1883,
+      "tls": false,
+      "username": "management-client",
+      "password": "fixture-password",
+      "expiresAt": "2026-08-15T20:30:01.000+08:00",
+      "eventTopic": "plate/management/recognition-events"
+    }
+  }
+}

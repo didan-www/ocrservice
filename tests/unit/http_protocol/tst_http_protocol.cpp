@@ -258,13 +258,15 @@ TEST(QueryDecoderTest, RejectsDuplicateUnknownMissingMalformedAndInvalidUtf8) {
 
 TEST(QueryDecoderTest, EnforcesTimeOrderingDeviceAndSafeInteger) {
     EXPECT_NO_THROW(http::protocol::decodeHistoryQuery(
-        "startTime=2026-08-15T12:30:44.000+08:00&endTime=2026-08-15T13:30:44.000+08:00&deviceId=device_1&page=9007199254740991&pageSize=100"));
+        "startTime=2026-08-15T12:30:44.000+08:00&endTime=2026-08-15T13:30:44.000+08:00&deviceId=device_1&page=2147483647&pageSize=100"));
     EXPECT_THROW(http::protocol::decodeHistoryQuery(
         "startTime=2026-08-15T13:30:44.000+08:00&endTime=2026-08-15T12:30:44.000+08:00&page=1&pageSize=100"), ProtocolError);
     EXPECT_THROW(http::protocol::decodeHistoryQuery(
         "startTime=2026-08-15T12:30:44.000+08:00&endTime=2026-08-15T13:30:44.000+08:00&deviceId=&page=1&pageSize=100"), ProtocolError);
     EXPECT_THROW(http::protocol::decodeHistoryQuery(
-        "startTime=2026-08-15T12:30:44.000+08:00&endTime=2026-08-15T13:30:44.000+08:00&page=9007199254740992&pageSize=100"), ProtocolError);
+        "startTime=2026-08-15T12:30:44.000+08:00&endTime=2026-08-15T13:30:44.000+08:00&page=2147483648&pageSize=100"), ProtocolError);
+    EXPECT_THROW(http::protocol::decodeAccessListPageQuery(
+        "listType=WHITE&keyword=&page=2147483648&pageSize=100"), ProtocolError);
 }
 
 TEST(HttpPolicyTest, DefinesExactContentTypesLimitsAndNoRedirects) {

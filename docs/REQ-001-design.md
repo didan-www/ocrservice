@@ -208,7 +208,7 @@ HTTP 运行时显式绑定 `0.0.0.0`，监听端口来自配置中的 `HTTP_PORT
 - `RecognitionOutcome`：tagged union，成功分支只含规范化 `PlateNumber`，失败分支只含 `PLATE_NOT_FOUND/PLATE_RECOGNITION_FAILED/MODEL_INFERENCE_ERROR`；不包含 HTTP 信息或自由错误文本。`SERVER_RESTARTED` 只用于启动恢复，不属于模型结果。
 - `HistoryFilter`：`startInclusiveUtc/endExclusiveUtc/optional<DeviceId>`，构造时保证 `start < end`；分页和 CSV 复用该筛选。
 - `AccessListFilter`：`AccessListType + PlateKeyword`；keyword 执行与车牌相同的 UTF-8、首尾空白和 ASCII 大写处理但允许为空，不能复用非空 `PlateNumber`。
-- `PageRequest`：只保存从 1 开始的 safe integer `page`；`pageSize=100` 是领域常量而不是可变字段。
+- `PageRequest`：只保存 1 至 2147483647（含两端）的 `page`，上限与 Qt 严格解析器使用的 `int` 一致；`pageSize=100` 是领域常量而不是可变字段。HTTP query decoder 和服务端分页 serializer 必须复用该领域上限，不能仅按 JSON safe integer 上限放行。
 - `PlateNumber`：通过 `text` 模块严格解码 UTF-8，按 Unicode code point 执行首尾空白去除、ASCII 大写、内部空白拒绝和 1 至 16 字符校验；长度不能按 UTF-8 字节数计算。Unicode 空白固定为 utf8proc 类别 `Zs/Zl/Zp` 加 U+0009 至 U+000D 和 U+0085，并用 Qt 合法/非法 fixture 做跨语言回归，禁止各控制器自行调用 ASCII `isspace`。
 - `BgrImageView`：严格校验的非持有 BGR8 字节视图，只含数据指针、字节数、宽、高和行跨度；不包含 OpenCV 类型。
 

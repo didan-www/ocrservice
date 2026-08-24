@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "code": "OK",
+  "message": "",
+  "requestId": "4a4911ce-041c-42ad-bff9-1dd5dc70de66",
+  "data": {
+    "items": [
+      {
+        "id": 5,
+        "listType": "WHITE",
+        "plateNumber": "京A12345",
+        "remark": "教学测试车辆",
+        "createdBy": "演示管理员",
+        "createdAt": "2026-08-15T12:00:00.000+08:00"
+      }
+    ],
+    "page": 1,
+    "pageSize": 100,
+    "total": 1
+  }
+}
