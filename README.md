@@ -2,7 +2,7 @@
 
 本项目是三端车牌识别教学系统中的 Linux 服务端。服务端接收嵌入式设备上传的车辆图片，异步调用 YOLOv8 和 LPRNet 完成车牌识别，将业务记录写入 MySQL，并通过 MQTT 分别通知 Qt 管理客户端和嵌入式设备。
 
-> 当前状态：需求基线已建立，服务端代码尚未开始实现。所有开发必须先阅读 [REQ-001](docs/REQ-001.md) 和 [AGENTS.md](AGENTS.md)。README 中暂不提供未经实际验证的构建或运行命令。
+> 当前状态：TASK-001 至 TASK-024 已全部实现并完成开发者验收及主 Agent 独立复验。所有开发必须先阅读 [REQ-001](docs/REQ-001.md) 和 [AGENTS.md](AGENTS.md)。本文件只记录已经实际验证成功的构建、测试和运行方法。
 
 ## 系统组成
 
@@ -98,9 +98,9 @@ MQTT QoS 1 和设备持久会话只保证 Broker 已经接受消息后的交付�
 
 字段、状态、错误码、时限和消息样例必须以 `docs/REQ-001.md` 为准，不能只根据本节摘要实现。
 
-## 教学部署基线
+## 教学部署
 
-Compose 计划包含三个独立容器：
+Compose 包含三个独立容器：
 
 ```text
 ocrservice-app       Linux 服务程序、模型和运行依赖
@@ -108,12 +108,12 @@ ocrservice-mysql     MySQL 8
 ocrservice-mqtt      Mosquitto
 ```
 
-计划暴露：
+默认暴露：
 
 - HTTP：`8080`
 - MQTT：`1883`
 
-计划持久化：
+持久化内容：
 
 - MySQL 数据。
 - Mosquitto 会话和离线 QoS 消息。
@@ -138,54 +138,110 @@ ocrservice-mqtt      Mosquitto
 
 新增设备不能只插入 MySQL。后续必须提供统一设备配置脚本，同时更新设备表、Mosquitto 密码文件和 ACL，并输出嵌入式端配置。
 
-## 计划目录
+## 已验证命令
 
-```text
-ocrservice/
-├── AGENTS.md
-├── README.md
-├── CMakeLists.txt
-├── Dockerfile
-├── docker-compose.yml
-├── config/
-│   ├── server.json.example
-│   └── mosquitto/
-├── docs/
-│   └── REQ-001.md
-├── models/
-│   ├── yolov8_plate.onnx
-│   └── lprnet.onnx
-├── scripts/
-│   └── provision-device.sh
-├── src/
-│   ├── app/
-│   ├── domain/
-│   ├── http/
-│   ├── services/
-│   ├── repositories/
-│   ├── model/
-│   ├── mqtt/
-│   ├── storage/
-│   └── logging/
-├── migrations/
-└── tests/
+以下命令是 TASK-024 实际成功命令的脱敏、可复现形式。尖括号参数必须替换为本机路径或凭据文件，不能把秘密写入命令历史、仓库或日志。
+
+全新 Debug/Release 配置显式复用固定版本源码目录，不复用旧二进制、`CMakeCache.txt` 或测试产物：
+
+```bash
+PINNED_SOURCE_ROOT="$PWD/build-task021-debug/_deps"
+MYSQL_CONCPP_ROOT='<ABSOLUTE_MYSQL_CONNECTOR_CPP_ROOT>'
+
+configure_build() {
+  build_type=$1
+  build_dir=$2
+  cmake -S . -B "$build_dir" -G Ninja \
+    -DCMAKE_BUILD_TYPE="$build_type" \
+    -DOCRSERVICE_BUILD_TESTING=ON \
+    -DOCRSERVICE_MYSQL_CONCPP_ROOT="$MYSQL_CONCPP_ROOT" \
+    -DFETCHCONTENT_SOURCE_DIR_ASIO="$PINNED_SOURCE_ROOT/asio-src" \
+    -DFETCHCONTENT_SOURCE_DIR_CROW="$PINNED_SOURCE_ROOT/crow-src" \
+    -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$PINNED_SOURCE_ROOT/googletest-src" \
+    -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON="$PINNED_SOURCE_ROOT/nlohmann_json-src" \
+    -DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME="$PINNED_SOURCE_ROOT/onnxruntime-src" \
+    -DFETCHCONTENT_SOURCE_DIR_PAHO_MQTT_C="$PINNED_SOURCE_ROOT/paho_mqtt_c-src" \
+    -DFETCHCONTENT_SOURCE_DIR_PAHO_MQTT_CPP="$PINNED_SOURCE_ROOT/paho_mqtt_cpp-src" \
+    -DFETCHCONTENT_SOURCE_DIR_SPDLOG="$PINNED_SOURCE_ROOT/spdlog-src" \
+    -DFETCHCONTENT_SOURCE_DIR_UTF8PROC="$PINNED_SOURCE_ROOT/utf8proc-src"
+}
+
+configure_build Debug build-task024-dev-debug
+cmake --build build-task024-dev-debug --parallel
+ctest --test-dir build-task024-dev-debug --output-on-failure
+
+configure_build Release build-task024-dev-release
+cmake --build build-task024-dev-release --parallel
+ctest --test-dir build-task024-dev-release --output-on-failure
 ```
 
-目录将在实施阶段按任务逐步创建。当前文档基线不意味着上述代码、脚本或命令已经存在。
+空数据卷 Compose 会占用宿主 `8080` 和 `1883`。运行前必须由操作者使用适合其环境的受控方式释放这两个端口，结束后恢复原宿主服务。本轮验收使用受控 host namespace 包装方式并确认宿主 Mosquitto 最终恢复为 active；公开测试入口为：
 
-## 建议开发顺序
+```bash
+bash tests/system/docker_compose/test_compose.sh
+```
 
-1. CMake、配置、日志和 Docker 构建基线。
-2. 领域 DTO、严格 JSON 编解码和 MySQL migration。
-3. MySQL Repository、固定演示数据和设备配置脚本。
-4. Qt 登录、注销、心跳和会话。
-5. 设备上传、图片存储、幂等和有界队列。
-6. YOLOv8/LPRNet 模型适配和后处理。
-7. MQTT 连接、ACL、管理事件和设备结果。
-8. 历史、图片、CSV 和黑白名单 API。
-9. Docker Compose 三端集成和实际 Qt/设备模拟器验收。
+设备开通必须使用统一脚本同步 MySQL、Mosquitto 密码文件和 ACL。Token 和密码通过模式 `0600` 的文件传入：
 
-每一步必须同时提交对应测试，不得先建立大量空接口。
+```bash
+DEVICE_ID='<DEVICE_ID>'
+DEVICE_NAME='<DEVICE_NAME>'
+MQTT_USERNAME='<MQTT_USERNAME>'
+HTTP_TOKEN_FILE='<HTTP_TOKEN_FILE>'
+MQTT_PASSWORD_FILE='<MQTT_PASSWORD_FILE>'
+HTTP_BASE_URL='<HTTP_BASE_URL>'
+DEVICE_CONFIG_JSON='<DEVICE_CONFIG_JSON>'
+scripts/provision-device.sh \
+  --device-id "$DEVICE_ID" \
+  --device-name "$DEVICE_NAME" \
+  --mqtt-username "$MQTT_USERNAME" \
+  --http-token-file "$HTTP_TOKEN_FILE" \
+  --mqtt-password-file "$MQTT_PASSWORD_FILE" \
+  --http-base-url "$HTTP_BASE_URL" \
+  --output "$DEVICE_CONFIG_JSON"
+```
+
+嵌入式 Full 联调使用全新 Release 构建出的模拟器：
+
+```bash
+EMBEDDED_SIMULATOR_BIN=build-task024-dev-release/tests/tests/simulators_embedded/embedded_device_simulator \
+  bash tests/system/embedded_e2e/test_embedded_e2e.sh
+```
+
+真实 Qt Full 联调在 Windows PowerShell 中运行，Qt 可执行文件和运行库均来自已验收的 Qt revision：
+
+```powershell
+$env:QT_E2E_USERNAME = '<QT_USERNAME>'
+$env:QT_E2E_PASSWORD = '<QT_PASSWORD>'
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File '<SERVER_REPOSITORY>\tests\system\qt_e2e\run-qt-e2e.ps1' `
+  -Executable '<QT_REPOSITORY>\build\task023-main-release\src\plate_client.exe' `
+  -QtMqttBin '<QT_MQTT_BIN>' `
+  -QtBin '<QT_6_11_1_BIN>' `
+  -MingwBin '<MINGW_13_1_0_BIN>' `
+  -Slice Full
+```
+
+发布镜像固定为 `ocrservice:req-001-v1.0.0` 和 `linux/amd64`。输出目录必须存在、位于仓库外且目标文件不能已存在：
+
+```bash
+OUTPUT_DIRECTORY='<ABSOLUTE_OUTPUT_DIRECTORY>'
+./scripts/build-release-image.sh \
+  --output "$OUTPUT_DIRECTORY/ocrservice-req-001-v1.0.0-linux-amd64.tar"
+```
+
+隔离网络无法访问 GitHub 时，可通过本地 HTTP 源提供官方 ONNX Runtime 固定归档；脚本仍强制验证 Dockerfile 中固定的 SHA-256：
+
+```bash
+OUTPUT_DIRECTORY='<ABSOLUTE_OUTPUT_DIRECTORY>'
+OCRSERVICE_RELEASE_ONNXRUNTIME_URL=http://172.17.0.1:38080/onnxruntime-linux-x64-1.20.1.tgz \
+  ./scripts/build-release-image.sh \
+  --output "$OUTPUT_DIRECTORY/ocrservice-req-001-v1.0.0-linux-amd64.tar"
+```
+
+该 URL 必须指向 SHA-256 与 Dockerfile 固定值完全一致的官方归档。TASK-024 验收实际将输出写入了仓库外目录；报告不记录验收机用户私有绝对路径。
+
+发布脚本拒绝覆盖已有归档、拒绝把归档写入仓库，并拒绝使用相对路径、符号链接逃逸或未提交的产品镜像输入。当前发布归档的 SHA-256 和内部负向验收证据见 [REQ-001 最终验收报告](docs/verification/REQ-001-acceptance-report.md)。
 
 ## 文档
 
