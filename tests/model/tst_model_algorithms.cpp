@@ -171,11 +171,12 @@ TEST(YoloPostprocessingTest, RejectsInvalidArguments) {
         std::invalid_argument);
 }
 
-TEST(LprPostprocessingTest, TransposesClassMajorOutputAndAppliesCtcRules) {
-    constexpr std::size_t timeSteps = 7U;
+TEST(LprPostprocessingTest, DecodesKnownPlateIndicesAndAppliesCtcRules) {
+    constexpr std::size_t timeSteps = 11U;
     std::vector<float> output(
         ocrservice::model::detail::kLprClassCount * timeSteps, -10.0F);
-    const std::array<std::size_t, timeSteps> sequence = {1U, 1U, 0U, 44U, 44U, 0U, 44U};
+    const std::array<std::size_t, timeSteps> sequence = {
+        26U, 26U, 67U, 59U, 39U, 31U, 37U, 56U, 56U, 67U, 47U};
     for (std::size_t time = 0U; time < timeSteps; ++time) {
         output[sequence[time] * timeSteps + time] = 10.0F;
     }
@@ -184,15 +185,30 @@ TEST(LprPostprocessingTest, TransposesClassMajorOutputAndAppliesCtcRules) {
         output.data(), ocrservice::model::detail::kLprClassCount, timeSteps);
 
     ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(*decoded, u8"\u4eacAA");
+    EXPECT_EQ(*decoded, u8"\u9655U806RG");
+}
+
+TEST(LprPostprocessingTest, HandlesBlankRepeatsFirstClassAndIo) {
+    constexpr std::size_t timeSteps = 9U;
+    std::vector<float> output(
+        ocrservice::model::detail::kLprClassCount * timeSteps, -10.0F);
+    const std::array<std::size_t, timeSteps> sequence = {
+        0U, 0U, 67U, 0U, 65U, 65U, 67U, 66U, 66U};
+    for (std::size_t time = 0U; time < timeSteps; ++time) {
+        output[sequence[time] * timeSteps + time] = 10.0F;
+    }
+    const auto decoded = ocrservice::model::detail::decodeLprCtc(
+        output.data(), ocrservice::model::detail::kLprClassCount, timeSteps);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded, u8"\u4eac\u4eacIO");
 }
 
 TEST(LprPostprocessingTest, RejectsBlankInvalidShapeAndNonFiniteOutput) {
     constexpr std::size_t timeSteps = 2U;
     std::vector<float> output(
         ocrservice::model::detail::kLprClassCount * timeSteps, -10.0F);
-    output[0U] = 10.0F;
-    output[1U] = 10.0F;
+    output[67U * timeSteps] = 10.0F;
+    output[67U * timeSteps + 1U] = 10.0F;
     EXPECT_FALSE(ocrservice::model::detail::decodeLprCtc(
                      output.data(), ocrservice::model::detail::kLprClassCount, timeSteps)
                      .has_value());
@@ -200,7 +216,7 @@ TEST(LprPostprocessingTest, RejectsBlankInvalidShapeAndNonFiniteOutput) {
                      output.data(), ocrservice::model::detail::kLprClassCount - 1U, timeSteps)
                      .has_value());
 
-    output[timeSteps] = std::numeric_limits<float>::infinity();
+    output[0U] = std::numeric_limits<float>::infinity();
     EXPECT_FALSE(ocrservice::model::detail::decodeLprCtc(
                      output.data(), ocrservice::model::detail::kLprClassCount, timeSteps)
                      .has_value());
@@ -210,16 +226,16 @@ TEST(LprPostprocessingTest, RejectsBlankInvalidShapeAndNonFiniteOutput) {
 
 TEST(LprPostprocessingTest, UsesTheExactFixedSixtyEightEntryCharacterTable) {
     static constexpr std::array<std::string_view, 68> expected = {
-        "", u8"\u4eac", u8"\u6d25", u8"\u5180", u8"\u664b", u8"\u8499",
-        u8"\u8fbd", u8"\u5409", u8"\u9ed1", u8"\u6caa", u8"\u82cf",
-        u8"\u6d59", u8"\u7696", u8"\u95fd", u8"\u8d63", u8"\u9c81",
-        u8"\u8c6b", u8"\u9102", u8"\u6e58", u8"\u7ca4", u8"\u6842",
-        u8"\u743c", u8"\u6e1d", u8"\u5ddd", u8"\u8d35", u8"\u4e91",
+        u8"\u4eac", u8"\u6caa", u8"\u6d25", u8"\u6e1d", u8"\u5180",
+        u8"\u664b", u8"\u8499", u8"\u8fbd", u8"\u5409", u8"\u9ed1",
+        u8"\u82cf", u8"\u6d59", u8"\u7696", u8"\u95fd", u8"\u8d63",
+        u8"\u9c81", u8"\u8c6b", u8"\u9102", u8"\u6e58", u8"\u7ca4",
+        u8"\u6842", u8"\u743c", u8"\u5ddd", u8"\u8d35", u8"\u4e91",
         u8"\u85cf", u8"\u9655", u8"\u7518", u8"\u9752", u8"\u5b81",
-        u8"\u65b0", u8"\u4f7f", u8"\u9886", "0", "1", "2", "3", "4",
-        "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F", "G",
-        "H", "J", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "U",
-        "V", "W", "X", "Y", "Z"};
+        u8"\u65b0", "0", "1", "2", "3", "4", "5", "6", "7", "8",
+        "9", "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L",
+        "M", "N", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y",
+        "Z", "I", "O", ""};
 
     EXPECT_EQ(ocrservice::model::detail::lprCharacters(), expected);
 }

@@ -39,7 +39,7 @@ Qt 管理客户端收到 `PROCESSING` 后按 `recognitionId` 从 HTTP 下载图�
 - 嵌入式设备独立 HTTP Token、MQTT 账号、Client ID 和主题 ACL。
 - JPEG/PNG 异步上传，按 `deviceId + captureId` 幂等。
 - 有界内存识别队列，默认单工作线程和容量 20。
-- YOLOv8 单类别车牌定位和 LPRNet CTC 字符识别。
+- YOLOv8 单类别车牌定位和与打包模型一致的 68 类 LPRNet CTC 字符识别（`blank=67`）。
 - MySQL 识别日志、历史分页、图片下载和服务端 CSV 导出。
 - 黑白名单查询、新增和删除。
 - Qt 管理 MQTT 实时事件和设备最终动作消息。

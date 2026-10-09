@@ -228,7 +228,7 @@ TEST(OnnxPlateRecognizerTest, FixedLprCropProducesKnownCharacterSequence) {
         (imageDirectory() / "teaching_plate.ppm").string(), cv::IMREAD_COLOR);
     ASSERT_FALSE(image.empty());
 
-    EXPECT_EQ(runFixedLprCrop(viewOf(image)), u8"Z\u76967\u4f7fZ7");
+    EXPECT_EQ(runFixedLprCrop(viewOf(image)), u8"\u7696A1A");
 }
 
 }  // namespace

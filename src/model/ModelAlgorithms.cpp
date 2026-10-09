@@ -219,7 +219,8 @@ std::optional<std::string> decodeLprCtc(
         return std::nullopt;
     }
     std::string decoded;
-    std::size_t previous = 0U;
+    constexpr std::size_t blankClass = kLprClassCount - 1U;
+    std::size_t previous = blankClass;
     for (std::size_t time = 0U; time < timeSteps; ++time) {
         std::size_t bestClass = 0U;
         float bestValue = classMajorOutput[time];
@@ -236,7 +237,7 @@ std::optional<std::string> decodeLprCtc(
                 bestClass = character;
             }
         }
-        if (bestClass != previous && bestClass != 0U) {
+        if (bestClass != previous && bestClass != blankClass) {
             decoded.append(lprCharacters()[bestClass]);
         }
         previous = bestClass;
@@ -249,13 +250,13 @@ std::optional<std::string> decodeLprCtc(
 
 const std::array<std::string_view, kLprClassCount>& lprCharacters() noexcept {
     static constexpr std::array<std::string_view, kLprClassCount> kCharacters = {
-        "", u8"京", u8"津", u8"冀", u8"晋", u8"蒙", u8"辽", u8"吉", u8"黑",
-        u8"沪", u8"苏", u8"浙", u8"皖", u8"闽", u8"赣", u8"鲁", u8"豫",
-        u8"鄂", u8"湘", u8"粤", u8"桂", u8"琼", u8"渝", u8"川", u8"贵",
-        u8"云", u8"藏", u8"陕", u8"甘", u8"青", u8"宁", u8"新", u8"使",
-        u8"领", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A",
-        "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P",
-        "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"};
+        u8"京", u8"沪", u8"津", u8"渝", u8"冀", u8"晋", u8"蒙", u8"辽",
+        u8"吉", u8"黑", u8"苏", u8"浙", u8"皖", u8"闽", u8"赣", u8"鲁",
+        u8"豫", u8"鄂", u8"湘", u8"粤", u8"桂", u8"琼", u8"川", u8"贵",
+        u8"云", u8"藏", u8"陕", u8"甘", u8"青", u8"宁", u8"新", "0",
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C",
+        "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "Q",
+        "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "I", "O", ""};
     return kCharacters;
 }
 
